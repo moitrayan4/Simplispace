@@ -1,4 +1,4 @@
-# Simplispace — Email Clutter Manager
+# Simplispace 
 
 Windows desktop app that connects a Gmail inbox (read-only), groups mail by
 sending service, and scores each service with a transparent rule-based engine.
