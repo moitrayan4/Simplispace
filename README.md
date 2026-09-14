@@ -87,15 +87,3 @@ cd backend && ..\mail\Scripts\python.exe test_scoring.py
 | POST   | /sync             | fetch + store metadata (last SYNC_MONTHS) |
 | GET    | /services         | scored, categorized service list          |
 
-## Scoring (proposal 7.1)
-
-Base 50, then: promotional −30, List-Unsubscribe −20, replied +40,
-transactional keywords +35, opened frequently +25, 50+ never-opened −40.
-Buckets: ≥70 Important, 40–69 Useful, 20–39 Optional, <20 Marketing/Inactive.
-Every service returns the exact signals that moved its score (explainable).
-Knobs live at the top of `backend/app/scoring.py` — calibrate against pilot data.
-
-## Not built (weeks 7–12, out of scope)
-
-Per-service cards with Keep/Unsubscribe, AI tier for ambiguous senders,
-confirmation-gated unsubscribe flow, inbox health score, security hardening.
