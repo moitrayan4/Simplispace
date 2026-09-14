@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+sqlalchemy
+google-auth
+google-auth-oauthlib
+google-api-python-client
+cryptography
