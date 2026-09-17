@@ -67,13 +67,41 @@ function LoginScreen() {
           <span>Continue with Google</span>
         </a>
 
-        <ul className="login-points">
-          <li><span className="dot" /> We only read your mail. We never send or delete anything.</li>
-          <li><span className="dot" /> Nothing gets unsubscribed until you say so.</li>
-          <li><span className="dot" /> What your emails say never leaves your inbox.</li>
+        <p className="login-fine">Sign in with Google to get started.</p>
+      </div>
+    </div>
+  );
+}
+
+function Check() {
+  return (
+    <span className="check">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </span>
+  );
+}
+
+function PrivacyNotice({ email, onAccept }) {
+  return (
+    <div className="login">
+      <div className="login-card notice">
+        <span className="logo-badge lg">
+          <img src="/logo-mark.png" alt="Simplispace" />
+        </span>
+        <h1 className="login-title">A quick note on privacy</h1>
+        <p className="login-sub">
+          You’re signed in as {email}. Here’s exactly what Simplispace does with your account.
+        </p>
+
+        <ul className="notice-points">
+          <li><Check /><span>We only read your mail. We never send or delete anything.</span></li>
+          <li><Check /><span>Nothing gets unsubscribed until you say so.</span></li>
+          <li><Check /><span>What your emails say never leaves your inbox.</span></li>
         </ul>
 
-        <p className="login-fine">Sign in with Google to get started.</p>
+        <button className="btn primary wide" onClick={onAccept}>Continue</button>
       </div>
     </div>
   );
@@ -103,6 +131,12 @@ export default function App() {
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(null);
+  const [ack, setAck] = useState(() => localStorage.getItem("privacyAck") === "1");
+
+  function acceptPrivacy() {
+    localStorage.setItem("privacyAck", "1");
+    setAck(true);
+  }
 
   const refreshStatus = () => api.status().then(setStatus).catch(() => setStatus({ connected: false }));
 
@@ -164,6 +198,8 @@ export default function App() {
   async function doDisconnect() {
     if (!confirm("Disconnect Gmail and delete stored data?")) return;
     await api.disconnect();
+    localStorage.removeItem("privacyAck");
+    setAck(false);
     setServices([]);
     refreshStatus();
   }
@@ -171,6 +207,8 @@ export default function App() {
   if (!status) return <div className="app"><p>Loading…</p></div>;
 
   if (!status.connected) return <LoginScreen />;
+
+  if (!ack) return <PrivacyNotice email={status.email} onAccept={acceptPrivacy} />;
 
   return (
     <div className="app">

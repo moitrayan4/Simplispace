@@ -14,3 +14,5 @@ frontend/dist/
 build/
 dist/
 *.spec
+build_exe.sh
+icon.ico
