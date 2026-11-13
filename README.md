@@ -8,11 +8,6 @@ The React frontend runs inside the app's own native window (PyWebView); it is no
 hosted website. The `docs/` folder is separate: it is only the project's public
 homepage, privacy policy and terms, served by GitHub Pages for Google's OAuth review.
 
-Built so far: **weeks 1–8, 10 and 11** of the proposal (OAuth, metadata sync and
-grouping, rule-based scoring and categories, per-sender decision cards, the
-confirmation-gated unsubscribe flow, and the inbox health score with savings
-estimates). Week 9 (AI classification) is not built yet.
-
 ## Project layout
 
 | Path | What it is |
