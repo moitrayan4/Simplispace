@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src https://api.github.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Simplispace – Email Clutter Manager</title>
   <meta name="description" content="Simplispace is a Windows app that shows which services email you, scores them, and helps you unsubscribe from the ones you don't need. Read-only Gmail access; your data stays on your computer.">
@@ -13,6 +15,7 @@
     <div class="wrap">
       <a class="brand" href="./"><img src="logo.png" alt="">Simplispace</a>
       <nav class="links">
+        <a href="download.html">Download</a>
         <a href="privacy.html">Privacy Policy</a>
         <a href="terms.html">Terms of Service</a>
       </nav>
@@ -27,24 +30,24 @@
         Simplispace is a Windows desktop app that groups your Gmail by the service that sent it,
         scores each sender, explains why, and helps you unsubscribe from the ones you don’t need.
       </p>
-      <a class="btn" href="https://github.com/moitrayan4/Simplispace/releases">Download for Windows</a>
+      <a class="btn" href="download.html">Download for Windows</a>
     </section>
 
     <section class="grid">
       <div class="card">
-        <h3>Every sender, scored</h3>
+        <h2>Every sender, scored</h2>
         <p>Each service gets a 0–100 score and a category (Important, Useful, Optional, Marketing) from clear, explained rules.</p>
       </div>
       <div class="card">
-        <h3>Unsubscribe only when you say so</h3>
+        <h2>Unsubscribe only when you say so</h2>
         <p>Nothing happens automatically. You pick a sender and confirm how to unsubscribe, and the app checks it worked.</p>
       </div>
       <div class="card">
-        <h3>Inbox health</h3>
+        <h2>Inbox health</h2>
         <p>See how much of your mail is worth reading, and how much time unsubscribing saves you each year.</p>
       </div>
       <div class="card">
-        <h3>Private by design</h3>
+        <h2>Private by design</h2>
         <p>Read-only Gmail access. Simplispace reads email details, never message bodies, and keeps everything on your own computer.</p>
       </div>
     </section>

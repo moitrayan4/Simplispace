@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
 
     # How many months of metadata to sync (proposal: 6-12+).
-    sync_months: int = 12
+    sync_months: int = 0  # 0 = whole mailbox; N = only the last N months
 
     # gmail.readonly is the only scope we ever request (proposal: minimal read-only).
     scopes: list[str] = ["https://www.googleapis.com/auth/gmail.readonly"]
