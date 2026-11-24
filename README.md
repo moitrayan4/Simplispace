@@ -2,7 +2,8 @@
 
 **A Windows desktop app** that connects a Gmail inbox (read-only, metadata only),
 groups mail by sending service, scores each sender with a transparent rule-based
-engine, and helps you keep or unsubscribe. It ships as a single `Simplispace.exe`.
+engine, and optionally requests an AI second opinion for ambiguous senders. It helps
+you keep or unsubscribe. It ships as a single `Simplispace.exe`.
 
 The React frontend runs inside the app's own native window (PyWebView); it is not a
 hosted website. The `docs/` folder is separate: it is only the project's public
@@ -33,11 +34,12 @@ creates `backend\.env` from `backend\.env.example` with a fresh `FERNET_KEY`.
 
 Then add Google OAuth credentials to `backend\.env`:
 
-1. In Google Cloud Console, create a project, enable the **Gmail API**, and create an
-   **OAuth 2.0 Client ID** (type *Web application*) with
-   `http://localhost:8000/auth/callback` as an authorized redirect URI.
+1. In Google Cloud Console, create a project, enable the **Gmail API**, configure
+   the OAuth consent screen, and create an **OAuth 2.0 Client ID** of type *Desktop app*.
 2. Add your Gmail address as a test user on the OAuth consent screen.
 3. Put the id and secret in `backend\.env` (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`).
+   Sign-in opens the system browser and returns to Simplispace through a temporary
+   loopback callback; no redirect URI needs to be registered.
 
 Ask the project owner for the shared client if you'd rather not create your own.
 Never commit `backend\.env`; it is gitignored.
@@ -50,8 +52,52 @@ mail\Scripts\python.exe desktop\main.py
 ```
 
 The app serves the built frontend from its own API on `localhost:8000` and shows it
-in a native window. Google sign-in runs inside the window and returns to the app.
+in a native window. Google sign-in opens in the system browser and returns to the app.
 In dev mode the database (`simplispace.db`) and icon cache live in `backend\`.
+
+### Run locally on macOS
+
+The backend and React app run on macOS in a browser. The packaged native desktop
+launcher and `.exe` build are Windows-only.
+
+Use Python 3.13 and Node.js 20.19+ (or 22.12+). From the project root:
+
+```bash
+python3 --version
+node --version
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env` and set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from a
+Google OAuth *Desktop app* client. For local development, the system browser opens
+for sign-in and returns to a temporary loopback callback. Generate and set
+`FERNET_KEY` with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Run the API and frontend in two Terminal windows, from the project root:
+
+```bash
+cd backend
+../.venv/bin/python -m uvicorn app.main:app --reload --port 8000
+```
+
+```bash
+cd frontend
+npm run dev -- --host localhost
+```
+
+Open <http://localhost:5173>. Keep the API terminal running while using the app.
+The frontend calls the API at `localhost:8000`; `backend/.env` already sets the
+matching frontend origin. AI is optional; configure its provider in `backend/.env`
+and enable it in Settings if you want AI second opinions.
 
 ### Faster UI work (hot reload)
 
@@ -71,16 +117,16 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
 Output: `dist\Simplispace.exe`, a single file anyone can run. The build bundles only
-the app's Google OAuth client (`GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI` from
+the app's Google OAuth desktop client (`GOOGLE_CLIENT_ID/SECRET` from
 `backend\.env`); the developer's `FERNET_KEY` and data are never shipped. On first
 launch each Windows user gets `%LOCALAPPDATA%\Simplispace` with their own database,
 sign-in, icon cache and a new encryption key sealed with Windows DPAPI.
 
-**Letting any Gmail account sign in:** in Google Cloud Console, *Google Auth
-Platform*, *Audience*, press **Publish app**. Until Google verifies the app, users
-see an "unverified app" warning and at most 100 accounts can sign in. While the app
-is in *Testing* mode, Google expires refresh tokens after 7 days and the app shows
-**Reconnect Gmail**.
+**Public release:** the app requests `gmail.readonly`, which Google classifies as a
+restricted OAuth scope. Before offering the app broadly, configure and publish the
+consent screen, complete Google's OAuth verification for the scope, and satisfy any
+additional review requirements Google identifies. Testing-mode accounts are limited
+to configured test users and may need to reconnect when refresh tokens expire.
 
 ## How it works
 
@@ -105,6 +151,18 @@ Gmail. Any unsubscribe can be undone from its card or from History.
 senders (Optional counts half), excluding senders you unsubscribed from. Savings
 estimates use each sender's monthly volume and 10 seconds per email.
 
+**AI second opinions (optional):** configure an OpenAI-compatible Chat Completions
+endpoint and model in `backend/.env` (plus an API key for hosted providers). For Groq,
+set `AI_BASE_URL=https://api.groq.com/openai/v1` and
+`AI_MODEL=openai/gpt-oss-20b`. AI is off by default and must also be
+enabled in Settings. The user can request a second opinion only for ambiguous senders.
+That request sends the sender domain, aggregate scoring evidence and up to three
+recent subject lines to the configured provider; subject lines may contain personal
+information. Message bodies and Gmail credentials are never sent. Responses are
+validated and confidence-gated; low-confidence or failed calls leave the rule result
+in place. Review the provider's data-use terms before enabling this feature.
+The confidence value is reported by the model and is not a calibrated probability.
+
 **Logout vs delete:** Logout removes Gmail access but keeps senders and analysis for
 the next sign-in. Delete account in Settings erases everything.
 
@@ -121,14 +179,15 @@ cd backend
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | /health | liveness |
-| GET | /auth/login | start Google OAuth |
-| GET | /auth/callback | OAuth redirect target |
+| POST | /auth/login | open system-browser Google OAuth sign-in |
 | GET | /auth/status | connected account and last sync |
 | POST | /auth/logout | revoke Gmail access, keep local data |
 | POST | /auth/delete-account | revoke access and erase all local data |
 | POST | /sync | start or continue a sync |
 | GET | /sync/status | sync progress |
 | GET | /services | scored, categorized sender list |
+| PUT | /ai/preferences | enable/disable AI with per-account consent |
+| POST | /services/{domain}/ai-classification | classify an eligible ambiguous sender |
 | GET | /services/{domain}/emails | 10 most recent emails from a sender |
 | GET | /icon/{domain} | cached sender icon |
 | GET | /decisions | saved Keep/Unsubscribe decisions |

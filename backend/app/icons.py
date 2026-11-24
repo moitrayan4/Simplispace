@@ -6,16 +6,21 @@ then the site's own /favicon.ico. Misses are cached too, so a domain without an 
 on every page view.
 """
 import re
+import ssl
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+import certifi
+
 from .scoring import root_domain
 from .unsubscribe import _is_public_host
 
 CACHE_DIR = Path("icons")  # beside the database (the app's working directory)
-RETRY_MISSES_AFTER = 7 * 24 * 3600
+# Recheck missing icons periodically. A temporary upstream outage should not hide
+# logos for a week after one failed lookup.
+RETRY_MISSES_AFTER = 60 * 60
 MAX_BYTES = 200_000
 _VALID = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 # Mail-only domains whose brand site has the logo.
@@ -42,23 +47,21 @@ class _Offline(Exception):
 
 
 def _google(site: str):
-    return _fetch(strict=True, url=
-        "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON"
-        f"&fallback_opts=TYPE,SIZE,URL&url=https://{site}&size=64"
-    )
+    # `default=404` prevents Google's generic globe icon being mistaken for a
+    # sender logo, allowing the next source (or letter fallback) to be used.
+    return _fetch(url=f"https://www.google.com/s2/favicons?domain={site}&sz=64&default=404")
 
 
-def _fetch(url: str, strict: bool = False) -> tuple[bytes, str] | None:
+def _fetch(url: str) -> tuple[bytes, str] | None:
     request = urllib.request.Request(url, headers={"User-Agent": "Simplispace"})
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        tls = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(request, timeout=5, context=tls) as response:
             kind = response.headers.get_content_type()
             body = response.read(MAX_BYTES + 1)
     except urllib.error.HTTPError:
         return None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        if strict:
-            raise _Offline
         return None
     # Raster images only: an SVG served from the app's own origin could carry script.
     if not kind.startswith("image/") or "svg" in kind or not body or len(body) > MAX_BYTES:
@@ -73,23 +76,17 @@ def get_icon(domain: str) -> tuple[bytes, str] | None:
     if root in _EMAIL_SERVICES or not _VALID.match(root):
         return None
     CACHE_DIR.mkdir(exist_ok=True)
-    hit, miss = CACHE_DIR / f"{root}.img", CACHE_DIR / f"{root}.none"
+    # Versioned cache names discard older generic globe images and misses.
+    hit, miss = CACHE_DIR / f"{root}.v2.img", CACHE_DIR / f"{root}.v2.none"
     if hit.exists():
         kind, _, body = hit.read_bytes().partition(b"\n")
         return body, kind.decode()
     if miss.exists() and time.time() - miss.stat().st_mtime < RETRY_MISSES_AFTER:
         return None
 
-    try:
-        found = (
-            _google(root)
-            or _google(f"www.{root}")
-            or _fetch(f"https://icons.duckduckgo.com/ip3/{root}.ico")
-        )
-    except _Offline:
-        return None  # no internet: don't remember it as "no icon", try again next time
-    if not found and _is_public_host(root):  # never fetch from local/private addresses
-        found = _fetch(f"https://{root}/favicon.ico")
+    found = _fetch(f"https://{root}/favicon.ico") if _is_public_host(root) else None
+    found = found or _google(root) or _google(f"www.{root}")
+    found = found or _fetch(f"https://icons.duckduckgo.com/ip3/{root}.ico")
     if not found:
         miss.touch()
         return None

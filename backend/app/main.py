@@ -58,7 +58,8 @@ async def cache_static(request: Request, call_next):
 # Pages that need something else (the unsubscribe hand-off) set their own policy.
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; connect-src 'self' http://localhost:8000 https://clients3.google.com; "
+    "img-src 'self' data: https://www.google.com https://t1.gstatic.com https://icons.duckduckgo.com; "
+    "connect-src 'self' http://localhost:8000 https://clients3.google.com; "
     "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 _SECURITY_HEADERS = {

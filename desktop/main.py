@@ -1,9 +1,8 @@
 """Simplispace desktop app (dev + PyInstaller-frozen).
 
 Runs the FastAPI backend in-process (it also serves the built frontend) and shows
-it in a native window. Everything happens inside the app: Google sign-in runs in the
-main window, and unsubscribe pages, Gmail and other links open in Simplispace windows
-(see _open_in_app), so the external browser is never needed.
+it in a native window. Google sign-in uses the system browser; unsubscribe pages,
+Gmail and other links open in Simplispace windows (see _open_in_app).
 
 Dev:     python desktop/main.py      (after: cd frontend && npm run build)
 Frozen:  Simplispace.exe             (data in %LOCALAPPDATA%\\Simplispace; no .env needed)
@@ -144,14 +143,6 @@ from app.main import app as fastapi_app  # noqa: E402
 # API are always one origin.
 API = "http://localhost:8000"
 
-# Plain desktop-Chrome UA so Google's consent page treats the WebView2 window as a
-# normal browser (avoids the embedded-webview "disallowed_useragent" path).
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
-
-
 def _open_in_app(url, title, on_page, on_closed, script="document.body ? document.body.innerText : ''"):
     """Open a page (an unsubscribe page, or Gmail) in a Simplispace window and report
     what it shows, so the app can acknowledge the result itself.
@@ -218,7 +209,7 @@ def main():
 
     # Persist the WebView2 session so the Google login survives restarts.
     webview.create_window("Simplispace", API, width=1120, height=780, maximized=True)
-    webview.start(user_agent=USER_AGENT, private_mode=False, storage_path=str(APP_DIR / ".webview"))
+    webview.start(private_mode=False, storage_path=str(APP_DIR / ".webview"))
 
 
 if __name__ == "__main__":

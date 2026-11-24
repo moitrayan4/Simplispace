@@ -61,6 +61,9 @@ class ServiceScore:
     sender_email: str = ""
     # Per-sender evidence behind the score, used to write a specific explanation.
     facts: dict = field(default_factory=dict)
+    # AI may change the displayed category, but the original deterministic result stays visible.
+    rule_category: str = ""
+    ai_classification: dict | None = None
 
 
 # ponytail: short list of two-part endings instead of the full Public Suffix List;
@@ -214,6 +217,7 @@ def score_service(
         signals=signals,
         sender_email=primary_email,
         facts=facts,
+        rule_category=category,
     )
 
 

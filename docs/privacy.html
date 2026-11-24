@@ -6,7 +6,7 @@
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy Policy – Simplispace</title>
-  <meta name="description" content="How Simplispace handles your Google data: read-only Gmail access, email details only (never message bodies), stored on your computer and never shared or sold.">
+  <meta name="description" content="How Simplispace handles Google data: read-only Gmail access, local storage by default, and optional AI classification with explicit consent.">
   <link rel="icon" href="logo.png">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -24,7 +24,7 @@
   <main class="wrap">
     <article>
       <h1>Privacy Policy</h1>
-      <p class="muted">Effective 7 November 2026</p>
+      <p class="muted">Effective 25 November 2026</p>
 
       <p>
         Simplispace (“the app”, “we”) is a Windows desktop application that helps you understand and reduce
@@ -33,8 +33,9 @@
       </p>
       <p class="note">
         <strong>In short:</strong> Simplispace has read-only access to Gmail, reads email details but never
-        message bodies, keeps everything on your own computer, and never sends your data to us or sells it to
-        anyone.
+        message bodies, and keeps data on your computer by default. If you enable AI second opinions, a limited
+        set of sender details and subject lines is sent to the AI provider configured for your copy of the app.
+        The developer does not receive your Gmail data.
       </p>
 
       <h2>1. Google user data we access</h2>
@@ -61,20 +62,23 @@
         <li>group your email by the service that sent it and show how many emails each one sends, how often
           you open them, and when the last one arrived;</li>
         <li>score each sender and explain why, using the subject lines, labels and the other details above;</li>
+        <li>if you enable AI in Settings, request a second opinion for ambiguous senders;</li>
         <li>calculate your inbox health score and estimated time saved;</li>
         <li>offer ways to unsubscribe, and check afterwards whether the sender stopped emailing you.</li>
       </ul>
       <p>
-        We do not use your data for advertising, do not sell it, do not let anyone read it, and do not use it
-        to train AI or machine-learning models.
+        Simplispace does not use your data for advertising or sell it. AI is off by default. When enabled, the
+        configured provider processes the limited fields described in section 4 to return a category and
+        confidence score. The provider’s own data-use and retention terms apply; review them before enabling AI.
       </p>
 
       <h2>3. Where your data is stored</h2>
       <p>
-        All data stays on your computer, in the app’s folder for your Windows user
+        App data is stored on your computer, in the app’s folder for your Windows user
         (<code>%LOCALAPPDATA%\Simplispace</code>). Your Google sign-in token is encrypted with a key generated
         on your computer. Simplispace has no servers: the developer never receives your email data, your
-        sign-in, or your choices.
+        sign-in, or your choices. If you explicitly enable AI, the request fields listed in section 4 are also
+        processed by the provider configured for the app.
       </p>
 
       <h2>4. When data leaves your computer</h2>
@@ -82,6 +86,12 @@
       <ul>
         <li><strong>Google:</strong> to sign you in and to read the Gmail data described above, through
           Google’s official Gmail API.</li>
+        <li><strong>AI provider (optional):</strong> only after you enable AI in Settings and request a second
+          opinion, the app sends the ambiguous sender’s domain, up to three recent subject lines, and aggregate
+          scoring signals to the configured OpenAI-compatible endpoint. Subject lines may contain personal
+          information. Email bodies, attachments, Gmail IDs, and OAuth credentials are not sent. The endpoint
+          and model are configured by the person who set up this copy of Simplispace; review that provider’s
+          terms before opting in. You can turn AI off in Settings.</li>
         <li><strong>Sender logos (optional):</strong> to show a sender’s logo, the app looks up that sender’s
           website address (for example <code>netflix.com</code>, never anything from your emails) once, using
           Google’s or DuckDuckGo’s website-icon service or the sender’s own website, and saves the logo on your
@@ -94,9 +104,9 @@
 
       <h2>5. Sharing</h2>
       <p>
-        We do not share, transfer, rent or sell your Google user data or any other personal data with anyone.
-        The only data that leaves your computer is described in section 4, and it is sent only to complete an
-        action you requested.
+        Simplispace does not sell your Google user data. Data leaves your computer only for the services listed
+        in section 4 and only to provide the feature you requested. If you enable AI, the configured AI provider
+        receives the fields described above under its own terms.
       </p>
 
       <h2>6. Limited Use disclosure</h2>
@@ -108,13 +118,15 @@
 
       <h2>7. Keeping and deleting your data</h2>
       <ul>
-        <li><strong>Log out</strong> in the app revokes Simplispace’s access to your Google account and deletes
-          all data the app stored for that account.</li>
+        <li><strong>Log out</strong> clears the saved sign-in and attempts to revoke Simplispace’s Google access.
+          Sender analysis and choices remain on this computer so they are available if you sign in again.</li>
+        <li><strong>Delete account</strong> in Settings erases the account’s locally stored data and attempts to
+          revoke Google access.</li>
         <li>You can also remove access at any time from your Google Account at
           <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
         <li>Deleting the <code>%LOCALAPPDATA%\Simplispace</code> folder removes everything the app has stored.</li>
       </ul>
-      <p>Data is kept on your computer only until you log out or delete it.</p>
+      <p>Data stays on your computer until you delete the account in Settings or remove the app’s data folder.</p>
 
       <h2>8. Security</h2>
       <p>

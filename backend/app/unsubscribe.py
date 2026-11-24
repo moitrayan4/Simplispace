@@ -9,6 +9,8 @@ or mail app, where the user finishes the action themselves.
 import ipaddress
 import re
 import socket
+import ssl
+import certifi
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,17 +62,27 @@ def one_click(url: str) -> None:
         url,
         data=_ONE_CLICK_BODY,
         method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Simplispace"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Simplispace/1.0 (unsubscribe)",
+        },
     )
+    tls = ssl.create_default_context(cafile=certifi.where())
+    opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=tls))
     try:
-        with urllib.request.build_opener(_NoRedirect).open(request, timeout=15) as response:
+        with opener.open(request, timeout=15) as response:
             if not 200 <= response.status < 300:
                 raise ValueError(f"The sender answered with HTTP {response.status}.")
     except urllib.error.HTTPError as e:
         if 300 <= e.code < 400:
             return  # accepted, then redirected to a confirmation page we don't follow
         raise ValueError(f"The sender answered with HTTP {e.code}.") from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", e)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise ValueError("The sender’s unsubscribe server has an invalid or untrusted HTTPS certificate.") from e
+        raise ValueError("Could not reach the sender’s unsubscribe server.") from e
+    except (TimeoutError, OSError) as e:
         raise ValueError("Could not reach the sender's unsubscribe server.") from e
 
 

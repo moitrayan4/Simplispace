@@ -154,7 +154,7 @@ function GoogleIcon() {
   );
 }
 
-function LoginScreen() {
+function LoginScreen({ onLogin, pending, error }) {
   const online = useOnline();
   return (
     <div className="login">
@@ -169,10 +169,10 @@ function LoginScreen() {
         </p>
 
         {online ? (
-          <a className="btn google" href={api.loginUrl()}>
+          <button className="btn google" onClick={onLogin} disabled={pending}>
             <GoogleIcon />
-            <span>Continue with Google</span>
-          </a>
+            <span>{pending ? "Waiting for Google sign-in…" : "Continue with Google"}</span>
+          </button>
         ) : (
           <button className="btn google" disabled>
             <GoogleIcon />
@@ -180,7 +180,11 @@ function LoginScreen() {
           </button>
         )}
 
-        {online ? (
+        {error ? (
+          <p className="error offline-inline" role="alert">{error}</p>
+        ) : pending ? (
+          <p className="login-fine">Complete sign-in in your system browser, then return here.</p>
+        ) : online ? (
           <p className="login-fine">Sign in with Google to get started.</p>
         ) : (
           <p className="error offline-inline" role="alert">
@@ -215,9 +219,10 @@ function PrivacyNotice({ email, onAccept }) {
         </p>
 
         <ul className="notice-points">
-          <li><Check /><span>We only read your mail. We never send or delete anything.</span></li>
+          <li><Check /><span>Simplispace only reads your Gmail; it never sends or deletes Gmail messages.</span></li>
           <li><Check /><span>Nothing gets unsubscribed until you say so.</span></li>
-          <li><Check /><span>What your emails say never leaves your inbox.</span></li>
+          <li><Check /><span>AI second opinions are off by default. If you enable them in Settings, a sender domain and up to three recent subject lines for an ambiguous sender are sent to the configured AI provider.</span></li>
+          <li><Check /><span>Email bodies are never downloaded or sent to an AI provider.</span></li>
         </ul>
 
         <button className="btn primary wide" onClick={onAccept}>Continue</button>
@@ -243,7 +248,7 @@ function SkeletonTable() {
 }
 
 const VIA_LABELS = {
-  one_click: "Unsubscribed with a one-click request.",
+  one_click: "A one-click unsubscribe request was sent to the sender.",
   link: "Unsubscribe page opened in your browser. Finish there if it asks.",
   mailto: "Unsubscribe email opened in your mail app. Send it to finish.",
   browser: "Unsubscribe request sent from your browser. Check the page it opened.",
@@ -315,7 +320,7 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
   if (decision.status === "confirmed") {
     return (
       <p className="decision-note done">
-        ✓ Unsubscribed. No emails since {shortDate(decision.unsubscribed_at)}.
+        ✓ Confirmed. No emails arrived after the 2-day grace period.
       </p>
     );
   }
@@ -323,8 +328,8 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
     return (
       <div className="decision-note failed">
         <span>
-          Still emailing you: {decision.emails_since} email{decision.emails_since === 1 ? "" : "s"} since you
-          unsubscribed. It may not have gone through.
+          Still emailing you: {decision.emails_since} email{decision.emails_since === 1 ? "" : "s"} arrived after the
+          2-day grace period. The unsubscribe may not have gone through.
         </span>
         <span className="note-actions">
           <button className="link inline" onClick={onRetry}>Try another way</button>
@@ -336,8 +341,9 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
   return (
     <div className="decision-note checking">
       <span>
-        {VIA_LABELS[decision.unsubscribed_via]} Simplispace will confirm it automatically if no new emails arrive by{" "}
-        {shortDate(decision.confirm_after)}.
+        {VIA_LABELS[decision.unsubscribed_via]} This does not confirm that the sender removed you. Simplispace checks
+        for new mail during sync and can confirm it after {shortDate(decision.confirm_after)} if no messages arrived
+        after the 2-day grace period.
       </span>
       <button className="link inline" onClick={onReset}>Didn’t finish? Undo</button>
     </div>
@@ -382,10 +388,6 @@ function hostOf(url) {
   }
 }
 
-function mailtoAddress(url) {
-  return decodeURIComponent(url.replace(/^mailto:/i, "").split("?")[0]);
-}
-
 function UnsubscribeDialog({ service, onClose, onDone }) {
   const online = useOnline();
   const [options, setOptions] = useState(null);
@@ -417,32 +419,21 @@ function UnsubscribeDialog({ service, onClose, onDone }) {
 
   const choices = options
     ? [
-        options.one_click && {
+        {
           method: "one_click",
+          disabled: !options.one_click,
           title: "Unsubscribe now (one-click)",
-          detail: `Simplispace sends a standard unsubscribe request to ${hostOf(options.link)}. Nothing is sent from your Gmail.`,
-        },
-        options.link && {
-          method: "link",
-          title: options.one_click ? "Unsubscribe in a Simplispace window" : "Open the unsubscribe page",
           detail: options.one_click
-            ? `Opens a Simplispace window that sends the unsubscribe request to ${hostOf(options.link)}. Use this if one-click is refused.`
-            : `Opens ${hostOf(options.link)} in a Simplispace window so you can finish there.`,
+            ? `Simplispace sends a standard unsubscribe request to ${hostOf(options.link)}. Nothing is sent from your Gmail.`
+            : "This sender has not provided the required one-click unsubscribe endpoint.",
         },
-        options.mailto && {
-          method: "mailto",
-          title: "Unsubscribe by email",
-          detail: `Opens a ready Gmail draft to ${mailtoAddress(options.mailto)} inside Simplispace. Press Send; the app notices when it’s sent.`,
-        },
-        options.gmail && (options.link || options.mailto) && {
+        {
           method: "gmail",
+          disabled: !options.gmail || !(options.link || options.mailto),
           title: "Use Gmail’s Unsubscribe button",
-          detail: "Opens their latest email in Gmail inside Simplispace. Click Unsubscribe next to the sender’s name; the app notices when Gmail confirms it.",
-        },
-        options.gmail && {
-          method: "block",
-          title: `Block ${service.name} in Gmail`,
-          detail: `Opens their latest email in Gmail inside Simplispace. Click ⋮ (More) at the top right of the email, then Block “${service.name}”. Future emails go straight to Spam.`,
+          detail: options.gmail && (options.link || options.mailto)
+            ? "Opens their latest email in Gmail inside Simplispace. Click Unsubscribe next to the sender’s name; the app notices when Gmail confirms it."
+            : "Gmail has no Unsubscribe option for this sender’s messages.",
         },
       ].filter(Boolean)
     : [];
@@ -464,8 +455,7 @@ function UnsubscribeDialog({ service, onClose, onDone }) {
         {!options && !error && <p className="muted">Checking this sender’s unsubscribe options…</p>}
         {options && !options.link && !options.mailto && (
           <p className="no-unsub">
-            {service.name}’s emails don’t include an unsubscribe link, so Gmail shows no Unsubscribe button
-            either. Blocking the sender is the way to stop them.
+            {service.name}’s emails don’t include a one-click unsubscribe link or a Gmail Unsubscribe option.
           </p>
         )}
         <div className="unsub-choices">
@@ -473,7 +463,7 @@ function UnsubscribeDialog({ service, onClose, onDone }) {
             <button
               key={choice.method}
               className="unsub-choice"
-              disabled={working || !online}
+              disabled={working || !online || choice.disabled}
               onClick={() => run(choice.method)}
             >
               <strong>{choice.title}</strong>
@@ -1024,7 +1014,7 @@ function DeleteAccountDialog({ email, senders, choices, onCancel, onConfirm }) {
 // Handlers are skipped in the check: they only call state setters and the API.
 const ServiceCard = memo(ServiceCardInner, (a, b) =>
   a.service === b.service && a.decision === b.decision && a.showLogos === b.showLogos &&
-  a.selected === b.selected);
+  a.selected === b.selected && a.classifying === b.classifying);
 
 // Arrow keys move between cards in the grid (row length read from the layout).
 function moveCardFocus(card, key) {
@@ -1059,6 +1049,7 @@ function RecentEmails({ domain }) {
 
 function ServiceCardInner({
   service, decision, onUnsubscribe, onKeep, onReset, onRetry, onAnswer, showLogos, selected, onSelect,
+  onClassifyAI, onDismissAI, classifying,
 }) {
   const unsubscribed = Boolean(decision?.unsubscribed_at);
   const categoryClass = CATEGORY_CLASS[service.category] || "";
@@ -1067,6 +1058,13 @@ function ServiceCardInner({
   const [logoLoaded, setLogoLoaded] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
   const [showEmails, setShowEmails] = useState(false);
+
+  // A transient icon request failure should not permanently disable logos for this
+  // mounted card. Re-enable/reload the setting and retry the current sender.
+  useEffect(() => {
+    setLogoSource(0);
+    setLogoLoaded(false);
+  }, [showLogos, service.domain]);
 
   // Shortcuts while the card itself has focus (not a button inside it).
   function onKeyDown(e) {
@@ -1080,8 +1078,15 @@ function ServiceCardInner({
     else return;
     e.preventDefault();
   }
-  // Served (and cached on disk) by the backend; missing ones fall back to the initial.
-  const logoSources = showLogos ? [`${api.base}/icon/${encodeURIComponent(service.domain)}`] : [];
+  // Try the local proxy first, then direct icon services in case backend outbound
+  // networking is unavailable. The final fallback is the sender's initial.
+  const logoSources = showLogos
+    ? [
+        `${api.base}/icon/${encodeURIComponent(service.domain)}`,
+        `https://www.google.com/s2/favicons?domain=${encodeURIComponent(service.domain)}&sz=64&default=404`,
+        `https://icons.duckduckgo.com/ip3/${encodeURIComponent(service.domain)}.ico`,
+      ]
+    : [];
   const logoUrl = logoSources[logoSource];
   const why = explain(service);
   const positivePoints = service.signals
@@ -1146,7 +1151,39 @@ function ServiceCardInner({
 
       <div className="service-category-row">
         <span className={`badge ${categoryClass}`}>{service.category}</span>
+        {service.ai_classification?.status === "applied" && (
+          <span className="ai-tag" title={service.ai_classification.explanation}>
+            AI second opinion · model-reported confidence {Math.round(service.ai_classification.confidence * 100)}%
+          </span>
+        )}
       </div>
+      {service.ai_classification?.status === "low_confidence" && (
+        <p className="ai-result muted small">
+          AI suggested {service.ai_classification.category} (model-reported confidence {Math.round(service.ai_classification.confidence * 100)}%),
+          below the acceptance threshold. {service.category} remains the category.
+        </p>
+      )}
+      {service.ai_classification?.status === "failed" && (
+        <p className="ai-result muted small">The AI review failed. The rule-based category remains; you can retry.</p>
+      )}
+      {service.ai_classification?.status === "applied" && (
+        <p className="ai-result muted small">{service.ai_classification.explanation}</p>
+      )}
+      {service.ai_classification && (
+        <button className="link small" type="button" onClick={() => onDismissAI(service.domain)}>
+          Dismiss AI recommendation
+        </button>
+      )}
+      {service.ai_eligible && (!service.ai_classification || service.ai_classification.status === "failed") && (
+        <button
+          className="ai-review-btn"
+          type="button"
+          disabled={classifying}
+          onClick={() => onClassifyAI(service.domain)}
+        >
+          {classifying ? "Asking the configured AI…" : "Get an AI second opinion"}
+        </button>
+      )}
 
       <div className="service-stats-grid">
         <div className="stat-cell">
@@ -1207,7 +1244,7 @@ function ServiceCardInner({
             <span>Start 50</span>
             <span className="pos">+{positivePoints}</span>
             <span className="neg">{negativePoints}</span>
-            <strong>= {service.score}/100 · {service.category}</strong>
+            <strong>= {service.score}/100 · rule category {service.rule_category || service.category}</strong>
           </div>
           {why.notes.length > 0 && (
             <ul className="why-notes">
@@ -1603,7 +1640,7 @@ function PrivacyView() {
         <ul className="notice-points">
           <li><Check /><span>Read-only Gmail access. Simplispace never sends, deletes, or changes your mail.</span></li>
           <li><Check /><span>Only email details are read: sender, subject, date, labels, and unsubscribe headers. Email bodies are never downloaded.</span></li>
-          <li><Check /><span>Everything stays on this computer, in a local database. Your Gmail sign-in is stored encrypted.</span></li>
+          <li><Check /><span>Your data stays on this computer by default. If you enable AI in Settings, only the sender domain and up to three recent subject lines for ambiguous senders are sent to the configured AI provider. Your Gmail sign-in is stored encrypted.</span></li>
           <li><Check /><span>Sender logos are looked up by website address only, once per sender, via Google’s icon service or the sender’s own site. You can turn this off in Settings.</span></li>
           <li><Check /><span>Nothing is unsubscribed until you confirm how you want to do it.</span></li>
         </ul>
@@ -1612,7 +1649,7 @@ function PrivacyView() {
         <div className="panel-head"><strong>Manage access</strong></div>
         <p className="muted small">
           You can remove Simplispace’s access at any time from your Google account, or log out here to revoke
-          it and delete local data.
+          while keeping your local data; choose Delete account in Settings to erase it from this computer.
         </p>
         <a className="btn" href="https://myaccount.google.com/permissions" target="_blank" rel="noreferrer">
           Open Google account permissions
@@ -1703,7 +1740,7 @@ function useDisplaySettings() {
   return { theme, setTheme, zoom, setZoom, step, logos, setLogos };
 }
 
-function SettingsView({ display, email, onDeleteAccount }) {
+function SettingsView({ display, email, status, onSetAiEnabled, onDeleteAccount }) {
   return (
     <>
       <section className="panel">
@@ -1732,6 +1769,33 @@ function SettingsView({ display, email, onDeleteAccount }) {
         <p className="muted small">
           Logos are looked up once per sender by its website address (never anything from your emails) and
           saved on this computer. Turn this off to show letters only.
+        </p>
+      </section>
+      <section className="panel">
+        <div className="panel-head"><strong>AI second opinions</strong></div>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={Boolean(status.ai_enabled)}
+            disabled={!status.ai_available && !status.ai_enabled}
+            onChange={(e) => onSetAiEnabled(e.target.checked)}
+          />
+          <span>Enable AI classification</span>
+        </label>
+        {!status.ai_available && (
+          <p className="muted small">
+            {status.ai_setup_hint || "AI is unavailable until its provider is configured in backend/.env and the backend is restarted."}
+          </p>
+        )}
+        {status.ai_available && (
+          <p className="muted small">Configured provider: {status.ai_provider} · model: {status.ai_model}</p>
+        )}
+        <p className="muted small">
+          When enabled, you can request a second opinion for ambiguous senders. That request sends the sender domain,
+          up to three recent subject lines, and aggregate scoring signals to the configured provider. Subject lines may
+          contain personal information. Email bodies and Gmail credentials are never sent. Turn this off any time.
+          Model-reported confidence is not a calibrated probability.
+          Turning it off also removes saved AI results.
         </p>
       </section>
       <section className="panel">
@@ -1781,6 +1845,8 @@ export default function App() {
   const online = useOnline();
   const [notice, setNotice] = useState("");
   const [status, setStatus] = useState(null);
+  const [loginPending, setLoginPending] = useState(false);
+  const [loginError, setLoginError] = useState("");
   const [services, setServices] = useState([]);
   const [loadingServices, setLoadingServices] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1790,6 +1856,7 @@ export default function App() {
   const [progressVisible, setProgressVisible] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [classifyingDomain, setClassifyingDomain] = useState(null);
   useEffect(() => {
     if (!success) return;
     const t = setTimeout(() => setSuccess(""), 6000);
@@ -1954,11 +2021,51 @@ export default function App() {
     applyDecision(domain, record);
     if (CONFIRMED.includes(record.status)) setSuccess(`Unsubscribed from ${nameOf(domain)}.`);
     else if (record.status !== "in_progress" && !record.fallback_reason)
-      setSuccess(`Unsubscribe request sent to ${nameOf(domain)}. Simplispace will confirm once their emails stop.`);
+      setSuccess(`Unsubscribe request sent to ${nameOf(domain)}. Simplispace will check for new mail during sync.`);
   }
 
   // A failed check is not "signed out": keep what we know and try again shortly.
   const refreshStatus = () => api.status().then(setStatus).catch(() => setTimeout(refreshStatus, 1500));
+
+  async function beginGoogleLogin() {
+    if (loginPending) return;
+    setLoginError("");
+    try {
+      await api.login();
+      setLoginPending(true);
+    } catch (e) {
+      setLoginError(e.message || "Couldn’t start Google sign-in.");
+    }
+  }
+
+  useEffect(() => {
+    if (!loginPending) return;
+    let stopped = false;
+    const checkLogin = async () => {
+      try {
+        const next = await api.status();
+        if (stopped || next.login_in_progress) return;
+        if (next.login_error) {
+          setLoginError(next.login_error);
+          setLoginPending(false);
+        } else if (next.connected && !next.needs_reconnect) {
+          // Reinitialize sync/status effects after both first sign-in and reconnect.
+          window.location.reload();
+        } else {
+          setLoginError("Google sign-in did not complete. Please try again.");
+          setLoginPending(false);
+        }
+      } catch {
+        // Keep polling through a temporary local API hiccup.
+      }
+    };
+    const timer = setInterval(checkLogin, 1000);
+    checkLogin();
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [loginPending]);
 
   useEffect(() => {
     refreshStatus();
@@ -1994,6 +2101,47 @@ export default function App() {
       setError("Couldn’t load your senders. Check that Simplispace is running and try “Sync now”.");
     } finally {
       setLoadingServices(false);
+    }
+  }
+
+  async function setAiEnabled(enabled) {
+    try {
+      const preference = await api.setAiPreference(enabled);
+      setStatus((current) => ({ ...current, ...preference }));
+      await loadServices();
+      setSuccess(enabled ? "AI second opinions enabled." : "AI second opinions disabled.");
+    } catch (e) {
+      setError(e.message || "Couldn’t update the AI setting.");
+      await refreshStatus();
+    }
+  }
+
+  async function requestAiReview(domain) {
+    setClassifyingDomain(domain);
+    setError("");
+    try {
+      const result = await api.classifyService(domain);
+      await loadServices();
+      setSuccess(
+        result.status === "applied"
+          ? `AI second opinion: ${result.category} (${Math.round(result.confidence * 100)}% confidence).`
+          : `AI confidence was low; ${result.rule_category} remains the category.`,
+      );
+    } catch (e) {
+      setError(e.message || "Couldn’t classify this sender.");
+      await loadServices();
+    } finally {
+      setClassifyingDomain(null);
+    }
+  }
+
+  async function dismissAiReview(domain) {
+    try {
+      await api.dismissAiClassification(domain);
+      await loadServices();
+      setSuccess("AI recommendation dismissed. The rule-based category is restored.");
+    } catch (e) {
+      setError(e.message || "Couldn’t dismiss the AI recommendation.");
     }
   }
 
@@ -2149,7 +2297,7 @@ export default function App() {
 
   if (!status) return <div className="app"><p>Loading…</p></div>;
 
-  if (!status.connected) return <LoginScreen />;
+  if (!status.connected) return <LoginScreen onLogin={beginGoogleLogin} pending={loginPending} error={loginError} />;
 
   if (!ack) return <PrivacyNotice email={status.email} onAccept={acceptPrivacy} />;
 
@@ -2216,10 +2364,13 @@ export default function App() {
               <span className="muted small">Your senders and choices are saved. Reconnect to keep syncing.</span>
             </div>
             {online ? (
-              <a className="btn primary sm" href={api.loginUrl()}>Reconnect Gmail</a>
+              <button className="btn primary sm" onClick={beginGoogleLogin} disabled={loginPending}>
+                {loginPending ? "Waiting for Google…" : "Reconnect Gmail"}
+              </button>
             ) : (
               <button className="btn primary sm" disabled title="Needs an internet connection">Reconnect Gmail</button>
             )}
+            {loginError && <span className="error small" role="alert">{loginError}</span>}
           </div>
         )}
 
@@ -2346,6 +2497,9 @@ export default function App() {
                       showLogos={display.logos}
                       selected={selected.has(service.domain)}
                       onSelect={toggleSelect}
+                      onClassifyAI={requestAiReview}
+                      onDismissAI={dismissAiReview}
+                      classifying={classifyingDomain === service.domain}
                     />
                   ))}
                 </div>
@@ -2381,7 +2535,13 @@ export default function App() {
         {view === "privacy" && <PrivacyView />}
 
         {view === "settings" && (
-          <SettingsView display={display} email={status.email} onDeleteAccount={() => setConfirmDelete(true)} />
+          <SettingsView
+            display={display}
+            email={status.email}
+            status={status}
+            onSetAiEnabled={setAiEnabled}
+            onDeleteAccount={() => setConfirmDelete(true)}
+          />
         )}
 
         {!VIEW_TITLES[view] && (

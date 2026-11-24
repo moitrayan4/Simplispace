@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -27,6 +27,8 @@ class User(Base):
     # Logged out = False: the account's senders and choices stay on this computer and
     # come back on the next sign-in. Only "Delete account" removes them.
     signed_in: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Explicit user consent is required before any message subjects go to an AI provider.
+    ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -83,3 +85,22 @@ class HealthSnapshot(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     day: Mapped[str] = mapped_column(String)  # YYYY-MM-DD (UTC)
     score: Mapped[int] = mapped_column(Integer)
+
+
+class AIClassification(Base):
+    """Validated AI second opinion, keyed by its exact local evidence fingerprint."""
+
+    __tablename__ = "ai_classifications"
+    __table_args__ = (UniqueConstraint("user_id", "domain", name="uq_user_ai_domain"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    domain: Mapped[str] = mapped_column(String)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    rule_category: Mapped[str] = mapped_column(String)
+    suggested_category: Mapped[str] = mapped_column(String)
+    confidence: Mapped[float] = mapped_column(Float)
+    explanation: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String)  # applied | low_confidence
+    model: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

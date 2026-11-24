@@ -5,7 +5,9 @@ const BASE = import.meta.env.VITE_API_BASE || (location.port === "5173" ? "http:
 
 async function json(path, opts = {}) {
   const res = await fetch(BASE + path, {
-    credentials: "include",
+    // The API uses no cookies; omitting cross-origin credentials matches its
+    // CORS policy and lets the Vite dev origin call localhost:8000.
+    credentials: "omit",
     ...opts,
     // The API rejects state-changing requests without this header (cross-site protection).
     headers: {
@@ -31,10 +33,17 @@ const enc = encodeURIComponent;
 export const api = {
   base: BASE,
   status: () => json("/auth/status"),
+  login: () => json("/auth/login", { method: "POST" }),
   startSync: (nextPage = false) =>
     json(`/sync?next_page=${nextPage === true ? "true" : "false"}`, { method: "POST" }),
   syncStatus: () => json("/sync/status"),
   services: () => json("/services"),
+  setAiPreference: (enabled) =>
+    json("/ai/preferences", { method: "PUT", body: JSON.stringify({ enabled }) }),
+  classifyService: (domain) =>
+    json(`/services/${enc(domain)}/ai-classification`, { method: "POST" }),
+  dismissAiClassification: (domain) =>
+    json(`/services/${enc(domain)}/ai-classification`, { method: "DELETE" }),
   insights: () => json("/insights"),
   decisions: () => json("/decisions"),
   setDecision: (domain, decision) =>
@@ -51,5 +60,4 @@ export const api = {
   openInApp: (url) => json("/open-in-app", { method: "POST", body: JSON.stringify({ url }) }),
   logout: () => json("/auth/logout", { method: "POST" }),
   deleteAccount: () => json("/auth/delete-account", { method: "POST" }),
-  loginUrl: () => BASE + "/auth/login",
 };

@@ -45,6 +45,8 @@ def ensure_schema():
             connection.execute(text("ALTER TABLE users ADD COLUMN sync_page_token TEXT"))
         if "signed_in" not in user_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN signed_in BOOLEAN DEFAULT 1"))
+        if "ai_enabled" not in user_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN ai_enabled BOOLEAN DEFAULT 0"))
         for column in ("history_id", "history_start"):
             if column not in user_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column} TEXT"))

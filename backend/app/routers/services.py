@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, deque
 import html
 import json
 import secrets
@@ -18,9 +18,10 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import gmail, icons, scoring, security, sync, unsubscribe
+from .. import ai, gmail, icons, scoring, security, sync, unsubscribe
+from ..config import settings
 from ..db import SessionLocal, get_db
-from ..models import Decision, HealthSnapshot, Message, User
+from ..models import AIClassification, Decision, HealthSnapshot, Message, User
 from .auth import active_user
 
 # Sender domains as stored by sync: lowercase host names. Anything else is rejected (422).
@@ -44,6 +45,7 @@ _sync = {
     "first_page_done": False,
 }
 _thread: threading.Thread | None = None
+_ai_call_times: deque[float] = deque()
 
 
 def cancel_sync():
@@ -237,6 +239,7 @@ def _load_scored(db: Session, user: User):
     rows = db.query(*_SCORE_COLUMNS).filter(Message.user_id == user.id).all()
     replied = set(json.loads(user.replied_domains or "[]"))
     scored = scoring.score_all(rows, replied)
+    ai.apply_saved(db, user, rows, scored)
     _score_cache.clear()
     _score_cache[user.id] = (version, rows, scored)
     return rows, scored
@@ -244,6 +247,129 @@ def _load_scored(db: Session, user: User):
 
 class OpenIn(BaseModel):
     url: str
+
+
+class AIPreferenceIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/ai/preferences")
+def set_ai_preference(body: AIPreferenceIn, db: Session = Depends(get_db)):
+    """Persist explicit per-account consent for sending minimal evidence to a model."""
+    user = _require_user(db)
+    if body.enabled and not ai.provider_ready():
+        raise HTTPException(503, "AI is not configured. Set AI_MODEL and a valid AI_BASE_URL; hosted providers also need AI_API_KEY.")
+    user.ai_enabled = body.enabled
+    if not body.enabled:
+        db.query(AIClassification).filter_by(user_id=user.id).delete(synchronize_session=False)
+    db.commit()
+    sync.bump_data_version()
+    return {
+        "ai_enabled": user.ai_enabled,
+        "ai_available": ai.provider_ready(),
+        "ai_setup_hint": ai.setup_message(),
+        "ai_provider": ai.provider_label(),
+        "ai_model": settings.ai_model.strip() if ai.provider_ready() else None,
+    }
+
+
+@router.post("/services/{domain}/ai-classification")
+def classify_ambiguous_service(domain: Domain, db: Session = Depends(get_db)):
+    """Return an AI second opinion only after opt-in and only for an ambiguous sender."""
+    user = _require_user(db)
+    if not user.ai_enabled:
+        raise HTTPException(403, "Enable AI classification in Settings before requesting a second opinion.")
+    if not ai.provider_ready():
+        raise HTTPException(503, "AI provider is not configured.")
+
+    rows, scored = _load_scored(db, user)
+    service = next((item for item in scored if item.domain == domain), None)
+    if service is None:
+        raise HTTPException(404, "Sender not found.")
+    if not ai.is_ambiguous(service, service.signals):
+        raise HTTPException(409, "This sender is outside the AI review band.")
+
+    messages = [row for row in rows if row.sender_domain == domain]
+    request_data, digest = ai.make_input(service, messages)
+    saved = db.query(AIClassification).filter_by(user_id=user.id, domain=domain).first()
+    if saved and saved.input_hash == digest and saved.status != "failed":
+        return {
+            "category": saved.suggested_category if saved.status == "applied" else saved.rule_category,
+            "rule_category": saved.rule_category,
+            "suggested_category": saved.suggested_category,
+            "confidence": saved.confidence,
+            "explanation": saved.explanation,
+            "status": saved.status,
+        }
+
+    now = time.monotonic()
+    while _ai_call_times and now - _ai_call_times[0] >= 60:
+        _ai_call_times.popleft()
+    if len(_ai_call_times) >= 5:
+        raise HTTPException(429, "AI review limit reached. Try again in a minute.")
+    _ai_call_times.append(now)
+    try:
+        result = ai.classify(request_data)
+    except ai.AIUnavailable as exc:
+        rule_category = service.rule_category or service.category
+        if saved is None:
+            saved = AIClassification(
+                user_id=user.id, domain=domain, input_hash=digest,
+                rule_category=rule_category, suggested_category=rule_category,
+                confidence=0.0, explanation="", status="failed", model=settings.ai_model.strip(),
+            )
+            db.add(saved)
+        else:
+            saved.input_hash = digest
+            saved.rule_category = rule_category
+            saved.suggested_category = rule_category
+            saved.confidence = 0.0
+            saved.explanation = ""
+            saved.status = "failed"
+            saved.model = settings.ai_model.strip()
+            saved.created_at = datetime.utcnow()
+        db.commit()
+        sync.bump_data_version()
+        raise HTTPException(502, str(exc)) from exc
+
+    if saved is None:
+        saved = AIClassification(user_id=user.id, domain=domain, input_hash=digest,
+                                 rule_category=service.rule_category or service.category,
+                                 suggested_category=result["suggested_category"],
+                                 confidence=result["confidence"], explanation=result["explanation"],
+                                 status=result["status"], model=result["model"])
+        db.add(saved)
+    else:
+        saved.input_hash = digest
+        saved.rule_category = service.rule_category or service.category
+        saved.suggested_category = result["suggested_category"]
+        saved.confidence = result["confidence"]
+        saved.explanation = result["explanation"]
+        saved.status = result["status"]
+        saved.model = result["model"]
+        saved.created_at = datetime.utcnow()
+    db.commit()
+    sync.bump_data_version()
+    return {
+        "category": result["category"] or (service.rule_category or service.category),
+        "rule_category": service.rule_category or service.category,
+        "suggested_category": result["suggested_category"],
+        "confidence": result["confidence"],
+        "explanation": result["explanation"],
+        "status": result["status"],
+    }
+
+
+@router.delete("/services/{domain}/ai-classification")
+def dismiss_ai_classification(domain: Domain, db: Session = Depends(get_db)):
+    """Discard an AI recommendation and restore the deterministic rule result."""
+    user = _require_user(db)
+    record = db.query(AIClassification).filter_by(user_id=user.id, domain=domain).first()
+    if record:
+        db.delete(record)
+        db.commit()
+        sync.bump_data_version()
+    return {"dismissed": True}
 
 
 @router.post("/open-in-app")
@@ -287,6 +413,9 @@ def list_services(db: Session = Depends(get_db)):
                 "has_unsubscribe": s.has_unsubscribe,
                 "score": s.score,
                 "category": s.category,
+                "rule_category": s.rule_category or s.category,
+                "ai_eligible": user.ai_enabled and ai.provider_ready() and ai.is_ambiguous(s, s.signals),
+                "ai_classification": s.ai_classification,
                 "facts": s.facts,
                 "signals": [
                     {
@@ -559,14 +688,10 @@ def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, request: Request, d
         if body.method == "one_click":
             if not options["one_click"]:
                 raise ValueError("This sender does not support one-click unsubscribe.")
-            try:
-                unsubscribe.one_click(options["link"])
-            except ValueError as e:
-                if body.no_fallback:
-                    raise
-                # Some senders refuse automated requests (bot protection, HTTP 403).
-                # Send the same POST from a real browser window instead.
-                page_url, fallback_reason = _handoff_url(request, domain), str(e)
+            # Never navigate a browser to an RFC 8058 endpoint as a fallback. Some
+            # senders return an empty attachment for POST requests, which browsers
+            # download instead of displaying. Leave the decision pending on failure.
+            unsubscribe.one_click(options["link"])
         elif body.method == "link":
             if not options["link"]:
                 raise ValueError("This sender did not provide that unsubscribe option.")
