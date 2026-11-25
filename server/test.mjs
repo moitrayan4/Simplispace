@@ -160,6 +160,12 @@ test("looks up the company, and still answers when the web doesn't", async () =>
   assert.deepEqual([(await post(mf, t)).body.sources, sent()], [[], null]);
   web = () => { throw new Error("down"); };
   assert.equal((await post(mf, t)).status, 200);
+  for (const hostile of ["<meta x=\"".repeat(13_000), "<title".repeat(20_000), "<meta ".repeat(20_000)]) {
+    web = (u) => (u.hostname === "shop.com" ? html(hostile) : new Response("", { status: 404 }));
+    const from = Date.now();
+    assert.equal((await post(mf, t)).status, 200);
+    assert.ok(Date.now() - from < 600, `slow: ${Date.now() - from} ms`);
+  }
   web = () => html("x".repeat(3_000_000));
   assert.equal((await post(mf, t)).status, 200);
   asked.length = 0;
@@ -184,5 +190,6 @@ test("kill switch, missing settings and provider failures", async () => {
   }
   groq = normal;
   assert.equal((await mf.dispatchFetch("https://x/health")).status, 200);
+  assert.equal((await mf.dispatchFetch("http://x/health")).status, 403);
   assert.equal((await mf.dispatchFetch("https://x/v2/opinion")).status, 404);
 });

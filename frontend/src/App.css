@@ -183,7 +183,7 @@ tbody tr:not(.detail) { transition: background 0.2s var(--ease); }
 tbody tr:not(.detail):active td { background: var(--fill); }
 @media (hover: hover) { tbody tr:not(.detail):hover td { background: rgba(0, 0, 0, 0.02); } }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.svc-name { font-weight: 600; }
+.svc-name { font-weight: 600; overflow-wrap: anywhere; }
 
 .score-chip {
   display: inline-flex; align-items: center; justify-content: center;

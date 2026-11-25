@@ -1,4 +1,5 @@
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import settings
@@ -14,6 +15,7 @@ if _is_sqlite:
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")  # readers don't block writer
         cur.execute("PRAGMA busy_timeout=30000")
+        cur.execute("PRAGMA secure_delete=ON")  # deleted mail is overwritten, not just unlinked
         cur.close()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
@@ -63,3 +65,15 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def compact(db) -> None:
+    """Rewrite the file without deleted rows and empty the journal, so they can't be recovered."""
+    db.commit()
+    try:
+        with db.get_bind().connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+            connection.execute(text("VACUUM"))
+            connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    except OperationalError:
+        pass  # busy: the rows are already overwritten (secure_delete)

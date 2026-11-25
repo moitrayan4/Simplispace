@@ -172,6 +172,7 @@ cd backend
 ..\mail\Scripts\python.exe test_ai.py
 ..\mail\Scripts\python.exe test_unsubscribe.py
 ..\mail\Scripts\python.exe test_email.py
+..\mail\Scripts\python.exe test_security.py
 ```
 
 ## API
@@ -194,7 +195,7 @@ cd backend
 | GET | /decisions | saved Keep/Unsubscribe decisions |
 | PUT | /decisions/{domain} | keep or reset a sender (`{"decision": "keep"\|null}`) |
 | GET | /unsubscribe/{domain} | unsubscribe methods the sender offers |
-| POST | /unsubscribe/{domain} | run a confirmed unsubscribe (`{"method": "one_click"\|"link"\|"mailto"}`) |
+| POST | /unsubscribe/{domain} | run a confirmed unsubscribe (`{"method": "one_click"\|"gmail"\|"block"}`) |
 | POST | /unsubscribe/{domain}/answer | record whether a manual unsubscribe worked |
 | POST | /open-in-app | open a link in a Simplispace window |
 | GET | /insights | health score, history, emails and time saved |

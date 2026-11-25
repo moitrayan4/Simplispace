@@ -5,9 +5,9 @@ const BASE = import.meta.env.VITE_API_BASE || (location.port === "5173" ? "http:
 
 async function json(path, opts = {}) {
   const res = await fetch(BASE + path, {
-    // The API uses no cookies; omitting cross-origin credentials matches its
-    // CORS policy and lets the Vite dev origin call localhost:8000.
-    credentials: "omit",
+    // The desktop app's session cookie goes to its own origin only; the Vite dev server
+    // calls another origin, where no cookie is used.
+    credentials: "same-origin",
     ...opts,
     // The API rejects state-changing requests without this header (cross-site protection).
     headers: {

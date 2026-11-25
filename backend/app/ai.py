@@ -26,6 +26,7 @@ CATEGORIES = {"Important", "Useful", "Optional", "Marketing/Inactive"}
 BOUNDARIES = (20, 40, 70)
 MAX_SUBJECT_LENGTH = 180
 MAX_RESPONSE_BYTES = 64 * 1024
+_LINK = re.compile(r"\S*(?:https?:|www\.|@)\S*", re.I)
 _WEBSITE = re.compile(r"([a-z0-9-]+\.)+[a-z][a-z0-9-]*[a-z0-9]")
 _EMAIL = re.compile(r"(?i)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\w)\+?\d[\d ().-]{7,}\d(?!\w)")
@@ -373,7 +374,8 @@ def _validated(result) -> dict:
         raise AIUnavailable("AI provider returned an invalid confidence value.")
     if not all(isinstance(t, str) for t in details.values()) or not details["reason"].strip():
         raise AIUnavailable("AI provider returned an invalid explanation.")
-    details = {k: " ".join(t.split())[:400] for k, t in details.items()}
+    # A company's website feeds the answer, so it must not be able to plant a link in the app.
+    details = {k: " ".join(_LINK.sub(" ", t).split())[:400] for k, t in details.items()}
     details["sources"] = [str(s)[:80] for s in sources[:3]] if isinstance(sources, list) else []
     threshold = max(0.0, min(1.0, float(settings.ai_confidence_threshold)))
     return {

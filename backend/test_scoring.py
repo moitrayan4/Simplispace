@@ -149,8 +149,6 @@ def test_gmail_in_app():
     assert done("Unsubscribed from Intrainz") and done("You blocked x@intrainz.com")
     assert done("Message sent. Undo View message") and done("Conversation reported as spam")
     assert not done("") and not done("Conversation archived. Undo")
-    url = unsubscribe.gmail_compose_url("mailto:off@list.example.com?subject=Unsubscribe%20me", "me@gmail.com")
-    assert "view=cm" in url and "to=off%40list.example.com" in url and "su=Unsubscribe+me" in url, url
 
 
 if __name__ == "__main__":

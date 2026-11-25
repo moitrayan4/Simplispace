@@ -9,6 +9,7 @@ import re
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -46,6 +47,21 @@ class _Offline(Exception):
     """Couldn't reach the icon service at all, so this isn't a real "no icon"."""
 
 
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    """A sender's site may redirect, but not to this computer or the local network."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = urllib.parse.urlsplit(newurl)
+        if parts.scheme != "https" or not parts.hostname or not _is_public_host(parts.hostname):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(request):
+    tls = ssl.create_default_context(cafile=certifi.where())
+    return urllib.request.build_opener(_PublicRedirects, urllib.request.HTTPSHandler(context=tls)).open(request, timeout=5)
+
+
 def _google(site: str):
     # `default=404` prevents Google's generic globe icon being mistaken for a
     # sender logo, allowing the next source (or letter fallback) to be used.
@@ -55,8 +71,7 @@ def _google(site: str):
 def _fetch(url: str, strict: bool = False) -> tuple[bytes, str] | None:
     request = urllib.request.Request(url, headers={"User-Agent": "Simplispace"})
     try:
-        tls = ssl.create_default_context(cafile=certifi.where())
-        with urllib.request.urlopen(request, timeout=5, context=tls) as response:
+        with _open(request) as response:
             kind = response.headers.get_content_type()
             body = response.read(MAX_BYTES + 1)
     except urllib.error.HTTPError as e:

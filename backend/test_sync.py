@@ -165,17 +165,17 @@ def test_offline_icon_lookup_is_not_cached_as_missing():
 
     with tempfile.TemporaryDirectory() as tmp, mock.patch.object(icons, "CACHE_DIR", Path(tmp)):
         offline = urllib.error.URLError(OSError("getaddrinfo failed"))
-        with mock.patch("urllib.request.urlopen", side_effect=offline):
+        with mock.patch.object(icons, "_open", side_effect=offline):
             assert icons.get_icon("example-shop.com") is None
         assert not list(Path(tmp).iterdir())  # nothing remembered: retried once online
 
         busy = urllib.error.HTTPError("u", 503, "Busy", {}, None)
-        with mock.patch("urllib.request.urlopen", side_effect=busy):
+        with mock.patch.object(icons, "_open", side_effect=busy):
             assert icons.get_icon("example-shop.com") is None
         assert not list(Path(tmp).iterdir())
 
         not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
-        with mock.patch("urllib.request.urlopen", side_effect=not_found):
+        with mock.patch.object(icons, "_open", side_effect=not_found):
             assert icons.get_icon("example-shop.com") is None
         assert [f.name for f in Path(tmp).iterdir()] == ["example-shop.com.v2.none"]  # a real miss is remembered
 
@@ -257,6 +257,9 @@ def test_sender_emails_preview_newest_first():
 
 
 def test_logout_keeps_data_delete_account_erases_it():
+    import tempfile
+    from pathlib import Path
+
     from app.models import Decision
     from app.routers import auth, services
 
@@ -270,6 +273,7 @@ def test_logout_keeps_data_delete_account_erases_it():
                 Decision(user_id=user.id, domain="a.com", decision="keep")])
     db.commit()
     auth._revoke = lambda _user: None
+    auth.icons.CACHE_DIR = Path(tempfile.mkdtemp())  # not this computer's real icon cache
     services.cancel_sync = lambda: None
 
     auth.logout(db)

@@ -11,7 +11,7 @@ import os
 import sys
 import threading
 import time
-import urllib.request
+import socket
 from pathlib import Path
 
 FROZEN = getattr(sys, "frozen", False)
@@ -76,38 +76,19 @@ def _sign_in_key(env_file: Path, local: dict, db_path: Path) -> str:
     return key
 
 
-def _prepare_user_data(app_dir: Path, exe_dir: Path, bundle: Path) -> None:
+def _prepare_user_data(app_dir: Path, bundle: Path) -> None:
     """Per-user data folder and settings for the packaged app.
 
     Each Windows user gets %LOCALAPPDATA%\\Simplispace with their own database,
-    sign-in and encryption key, so the same .exe works for anyone, from anywhere.
+    sign-in and encryption key, so the same .exe works for anyone, from anywhere. Nothing
+    is read from the folder the exe is in: in Downloads, anyone could have put it there.
     """
-    import shutil
-
     from dotenv import dotenv_values
 
     app_dir.mkdir(parents=True, exist_ok=True)
-    # Older builds kept everything beside the exe: carry it over once, so the
-    # existing account, sign-in and encryption key keep working.
-    for name in (".env", "icons", ".webview"):
-        old, new = exe_dir / name, app_dir / name
-        if old.exists() and not new.exists():
-            (shutil.copytree if old.is_dir() else shutil.copy2)(old, new)
-    old_db, new_db = exe_dir / "simplispace.db", app_dir / "simplispace.db"
-    if old_db.exists() and not new_db.exists():
-        # SQLite's backup API, not a file copy: recent changes can still be sitting in
-        # the -wal journal beside the database, and a plain copy would lose them.
-        import sqlite3
-
-        src, dst = sqlite3.connect(old_db), sqlite3.connect(new_db)
-        with dst:
-            src.backup(dst)
-        src.close()
-        dst.close()
-
     env_file = app_dir / ".env"
     local = dotenv_values(env_file) if env_file.exists() else {}
-    os.environ["FERNET_KEY"] = _sign_in_key(env_file, local, new_db)
+    os.environ["FERNET_KEY"] = _sign_in_key(env_file, local, app_dir / "simplispace.db")
     # The app's Google OAuth client ships inside the exe (Google does not treat an
     # installed app's client secret as confidential). A local .env can override it.
     for key, value in {**dotenv_values(bundle / "oauth.env"), **dotenv_values(env_file)}.items():
@@ -118,7 +99,7 @@ def _prepare_user_data(app_dir: Path, exe_dir: Path, bundle: Path) -> None:
 if FROZEN:
     BUNDLE = Path(sys._MEIPASS)              # bundled read-only files
     APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Simplispace"
-    _prepare_user_data(APP_DIR, Path(sys.executable).parent, BUNDLE)
+    _prepare_user_data(APP_DIR, BUNDLE)
     os.chdir(APP_DIR)                        # database, icons and sign-in live here
     sys.path.insert(0, str(BUNDLE))
     DIST = BUNDLE / "frontend" / "dist"
@@ -136,14 +117,28 @@ os.environ["FRONTEND_DIST"] = str(DIST)
 
 import uvicorn  # noqa: E402
 import webview  # noqa: E402
-from app import unsubscribe as unsubscribe_actions  # noqa: E402
+from app import session, unsubscribe as unsubscribe_actions  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
+
+# Read into settings by now; the browser processes the window starts needn't inherit them.
+for _name in ("FERNET_KEY", "GOOGLE_CLIENT_SECRET", "AI_API_KEY"):
+    os.environ.pop(_name, None)
 
 # Same host name Google's sign-in returns to, so the page, its saved settings and the
 # API are always one origin.
 API = "http://localhost:8000"
 
 _action_windows = set()  # windows whose popups must stay inside Simplispace
+
+
+def _ignore_page_messages():
+    """Pages can't call into the app. The window library lets any page it shows call Python by
+    name, and answers errors with file paths; Simplispace never uses that, so drop it all."""
+    from webview.platforms.edgechromium import EdgeChrome
+
+    EdgeChrome.on_script_notify = lambda self, sender, args: None
+    webview.settings["ALLOW_FILE_URLS"] = False
+    webview.settings["ALLOW_DOWNLOADS"] = False
 
 
 def _keep_popups_in_app():
@@ -174,40 +169,75 @@ def _open_in_app(url, title, on_page, on_closed, script="document.body ? documen
     """
     win = webview.create_window(title, url, width=980, height=760)
     _action_windows.add(win)
-    state = {"open": True}
+    closing, once = threading.Event(), threading.Lock()
+
+    def read(out):
+        try:
+            url, text = win.get_current_url(), win.evaluate_js(script)
+            # The page decides what this returns, so take nothing but plain text.
+            out.append((url or "", text[:50_000] if isinstance(text, str) else ""))
+        except Exception:
+            pass  # still opening, or mid-navigation: the next read gets it
 
     def watch():
-        while state["open"]:
-            time.sleep(0.5)  # short notices
-            try:
-                text = win.evaluate_js(script) or ""
-                current = win.get_current_url() or ""
-            except Exception:
-                continue  # mid-navigation; closing is handled by the closed event
-            if on_page(current, text):
+        while not closing.wait(0.5):  # often enough for short notices
+            # In its own thread: a read caught by a page change can wait forever.
+            out = []
+            reader = threading.Thread(target=read, args=(out,), daemon=True)
+            reader.start()
+            reader.join(3)
+            if out and on_page(*out[0]):
                 threading.Timer(2.5, win.destroy).start()  # let the user see the confirmation
                 return
 
     def closed():
-        state["open"] = False
-        _action_windows.discard(win)
-        on_closed()
+        closing.set()
+        if once.acquire(blocking=False):
+            _action_windows.discard(win)
+            on_closed()
 
-    win.events.shown += lambda: threading.Thread(target=watch, daemon=True).start()
     win.events.closed += closed
+    if win.events.closed.is_set():  # closed before we could listen
+        closed()
+    # Started here, not on the "shown" event: the window may already be on screen, and a
+    # listener added too late is never called.
+    threading.Thread(target=watch, daemon=True).start()
 
 
-def _run_api():
-    uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
-
-
-def _wait_for_api(timeout=20):
-    for _ in range(timeout * 2):
+def _listen() -> list[socket.socket]:
+    """Take port 8000 for this app alone, on both addresses "localhost" can mean. Otherwise
+    another program could answer in our place and the window would show its page."""
+    taken = []
+    for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        sock = None
         try:
-            urllib.request.urlopen(f"{API}/health", timeout=1)
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind((address, 8000))
+            sock.listen(128)
+            taken.append(sock)
+        except OSError as e:
+            if sock:
+                sock.close()
+            # 10047/10049: this computer has no IPv6, so "localhost" can't mean it.
+            if family == socket.AF_INET6 and e.winerror in (10047, 10049):
+                continue
+            for other in taken:
+                other.close()
+            return []
+    return taken
+
+
+def _start_api(timeout=20) -> bool:
+    sockets = _listen()
+    if not sockets:
+        return False
+    server = uvicorn.Server(uvicorn.Config(fastapi_app, log_level="warning"))
+    threading.Thread(target=server.run, kwargs={"sockets": sockets}, daemon=True).start()
+    for _ in range(timeout * 10):
+        if server.started:  # our own server, not just something that answers
             return True
-        except Exception:
-            time.sleep(0.5)
+        time.sleep(0.1)
     return False
 
 
@@ -216,9 +246,9 @@ def main():
         sys.exit(f"Frontend build missing at {DIST}")
 
     unsubscribe_actions.in_app_opener = _open_in_app
+    _ignore_page_messages()
     _keep_popups_in_app()
-    threading.Thread(target=_run_api, daemon=True).start()
-    if not _wait_for_api():
+    if not _start_api():
         # No console in the packaged app, so say it in a normal Windows message box.
         import ctypes
 
@@ -232,7 +262,18 @@ def main():
         sys.exit(1)
 
     # Persist the WebView2 session so the Google login survives restarts.
-    webview.create_window("Simplispace", API, width=1120, height=780, maximized=True)
+    window = webview.create_window("Simplispace", API + session.new_start_path(), width=1120, height=780, maximized=True)
+
+    def forget_google():
+        # Signing out of Simplispace must also sign out of Google in this window, or the next
+        # person could just press "Continue with Google". Then reopen the app.
+        time.sleep(1)  # let the page show that it worked
+        try:
+            window.clear_cookies()
+        finally:
+            window.load_url(API + session.new_start_path())
+
+    session.on_signed_out = lambda: threading.Thread(target=forget_google, daemon=True).start()
     webview.start(private_mode=False, storage_path=str(APP_DIR / ".webview"))
 
 

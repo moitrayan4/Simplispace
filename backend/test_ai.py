@@ -192,11 +192,30 @@ def test_sign_in_copes_with_whatever_permissions_google_grants():
         pass
 
 
+def test_links_in_ai_text_are_removed():
+    use(server=SERVER)
+    out = ai._validated({"category": "Useful", "confidence": 0.9, "about": "Go to https://evil.example/x now", "reason": "Mail help@evil.example", "advice": "See www.evil.example."})
+    assert "evil" not in out["explanation"], out["explanation"]
+
+
+def test_sign_in_attempts_expire():
+    from fastapi import HTTPException
+
+    from app.routers import auth
+
+    auth._pending_states["old"] = ("v", time.time() - 1)
+    try:
+        auth.callback(state="old", code="c", error=None, db=None)
+        raise AssertionError("expected to be refused")
+    except HTTPException as e:
+        assert e.status_code == 400 and "old" not in auth._pending_states
+
+
 def test_failed_sign_in_returns_to_the_app_without_details():
     from app.routers import auth
 
     for error, expect in ((gmail.GmailNotAllowed(), "gmail"), (ValueError("secret detail"), "ValueError")):
-        auth._pending_states["st"] = "v"
+        auth._pending_states["st"] = ("v", time.time() + 60)
         with mock.patch.object(gmail, "exchange_code", side_effect=error):
             r = auth.callback(state="st", code="c", error=None, db=None)
         assert r.headers["location"].endswith(f"/?login_error={expect}") and "st" not in auth._pending_states

@@ -1,8 +1,6 @@
 from collections import Counter, deque
-import html
 import json
 import re
-import secrets
 import threading
 import time
 import urllib.parse
@@ -10,8 +8,8 @@ from datetime import datetime, timedelta
 from email.utils import parseaddr
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi.responses import Response
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
 from httplib2 import ServerNotFoundError
@@ -634,79 +632,12 @@ def _steps(db: Session, user: User, domain: str) -> tuple[list[str], str]:
     return steps, next((s for s in steps if s not in failed), steps[-1])
 
 
-# One-time links for the browser hand-off page, so another website can't send the
-# user's browser here to unsubscribe them without the confirmation dialog.
-# ponytail: in-memory, single process; expires after 10 minutes.
-_handoffs: dict[str, tuple[str, float]] = {}
-
-
-def _handoff_url(request: Request, domain: str) -> str:
-    now = time.time()
-    for token, (_, expires) in list(_handoffs.items()):
-        if expires < now:
-            _handoffs.pop(token, None)
-    token = secrets.token_urlsafe(24)
-    _handoffs[token] = (domain, now + 600)
-    return f"{str(request.base_url).rstrip('/')}/unsubscribe-handoff/{token}"
-
-
-@router.get("/unsubscribe-handoff/{token}", response_class=HTMLResponse)
-def unsubscribe_handoff(token: str, db: Session = Depends(get_db)):
-    """Page opened in the user's own browser that sends the RFC 8058 one-click POST.
-
-    For senders that refuse the app's direct request: the same POST, sent by the
-    user's real browser after they confirmed in the app.
-    """
-    domain, expires = _handoffs.pop(token, (None, 0))
-    if not domain or expires < time.time():
-        raise HTTPException(404, "This unsubscribe link has expired. Start again from Simplispace.")
-    user = _require_user(db)
-    options = _unsubscribe_options(db, user, domain)
-    if not options["link"]:
-        raise HTTPException(404, "This sender has no unsubscribe link.")
-    gmail_url = _gmail_url(db, user, domain)
-    esc = html.escape
-    nonce = secrets.token_urlsafe(16)
-    gmail_hint = (
-        f'<p class="hint">Didn’t work? <a href="{esc(gmail_url)}">Open the email in Gmail</a> '
-        "and click Unsubscribe next to the sender’s name.</p>"
-        if gmail_url else ""
-    )
-    page = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Unsubscribing…</title>
-<style>
-body{{font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:520px;margin:60px auto;padding:0 16px;color:#1c1c1e;background:#f2f2f7}}
-@media (prefers-color-scheme:dark){{body{{color:#f2f2f7;background:#000}}a{{color:#64a8ff}}}}
-h1{{font-size:22px;margin:0 0 8px}} button{{font:inherit;font-weight:600;color:#fff;background:#007aff;border:0;border-radius:12px;padding:12px 20px;cursor:pointer}}
-.hint{{opacity:.75;font-size:14px}}
-</style></head><body>
-<h1>Unsubscribing from {esc(domain)}…</h1>
-<p>Your browser is sending the sender’s standard unsubscribe request. If nothing happens in a moment, press the button.</p>
-<form method="post" action="{esc(options['link'])}">
-<input type="hidden" name="List-Unsubscribe" value="One-Click">
-<button type="submit">Unsubscribe</button>
-</form>
-{gmail_hint}
-<script nonce="{nonce}">setTimeout(function(){{document.forms[0].submit()}},600)</script>
-</body></html>"""
-    # Only this page's own script may run, and its form may only post to the web.
-    csp = (
-        f"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; "
-        "form-action https: http:; base-uri 'none'; frame-ancestors 'none'"
-    )
-    return HTMLResponse(page, headers={"Content-Security-Policy": csp})
-
-
 class UnsubscribeIn(BaseModel):
-    method: Literal["one_click", "link", "mailto", "gmail", "block"]
-    # Bulk unsubscribe: if a sender refuses the one-click request, report it instead of
-    # opening a window for it, so ticking 20 senders can't open 20 windows.
-    no_fallback: bool = False
+    method: Literal["one_click", "gmail", "block"]
 
 
 @router.post("/unsubscribe/{domain}")
-def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, request: Request, db: Session = Depends(get_db)):
+def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, db: Session = Depends(get_db)):
     user = _require_user(db)
     # The confirmation is the user picking a method in the dialog; this call is that choice.
     row = _get_decision(db, user, domain)
@@ -715,10 +646,7 @@ def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, request: Request, d
 
     # Targets are re-read server-side; the client never supplies the URL.
     options = _unsubscribe_options(db, user, domain)
-    via = body.method
-    fallback_reason = None
-    page_url = None  # an unsubscribe web page to show the user
-    gmail_url = None  # Gmail (an email to unsubscribe/block from, or a draft) to show
+    gmail_url = None  # the sender's latest email, to unsubscribe or block from
     try:
         if body.method == "one_click":
             if not options["one_click"]:
@@ -727,27 +655,13 @@ def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, request: Request, d
             # senders return an empty attachment for POST requests, which browsers
             # download instead of displaying. Leave the decision pending on failure.
             unsubscribe.one_click(options["link"])
-        elif body.method == "link":
-            if not options["link"]:
-                raise ValueError("This sender did not provide that unsubscribe option.")
-            # One-click URLs often only accept POST; a plain visit (GET) fails with
-            # "POST required", so open the page that submits the POST instead.
-            page_url = _handoff_url(request, domain) if options["one_click"] else options["link"]
-        elif body.method in ("gmail", "block"):
+        else:
             gmail_url = _gmail_url(db, user, domain)
             if not gmail_url:
                 raise ValueError("No email from this sender to open in Gmail.")
-        else:
-            if not options["mailto"]:
-                raise ValueError("This sender did not provide that unsubscribe option.")
-            # Inside the app the draft opens in Gmail; outside it, the user's mail program.
-            gmail_url = unsubscribe.gmail_compose_url(options["mailto"], user.email)
-        in_app = bool((page_url or gmail_url) and unsubscribe.in_app_opener)
-        if page_url and not in_app:
-            unsubscribe.open_external(page_url)  # dev mode in a normal browser
-            via = "browser"
-        elif gmail_url and not in_app:
-            unsubscribe.open_external(options["mailto"] if body.method == "mailto" else gmail_url)
+        in_app = bool(gmail_url and unsubscribe.in_app_opener)
+        if gmail_url and not in_app:
+            unsubscribe.open_external(gmail_url)  # development in a normal browser
     except ValueError as e:
         raise HTTPException(502, str(e)) from e
 
@@ -755,16 +669,16 @@ def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, request: Request, d
         row = Decision(user_id=user.id, domain=domain)
         db.add(row)
     row.decision = "unsubscribe"
-    row.unsubscribed_via = "in_app" if in_app and page_url else via
+    row.unsubscribed_via = body.method
     # In-app pages are read by the app. Anything finished outside it (Gmail, a mail
     # draft, the browser) can't be seen, so the app asks the user instead of assuming.
-    row.page_result = "in_progress" if in_app else (None if via == "one_click" else "unclear")
+    row.page_result = "in_progress" if in_app else (None if body.method == "one_click" else "unclear")
     row.unsubscribed_at = datetime.utcnow()
     row.updated_at = row.unsubscribed_at
     db.commit()
     if in_app:
-        _open_in_app(page_url or gmail_url, user.id, domain, gmail=bool(gmail_url))
-    return {**_decision_json(row, db, user), "fallback_reason": fallback_reason}
+        _open_in_app(gmail_url, user.id, domain)
+    return _decision_json(row, db, user)
 
 
 def _set_page_result(user_id: int, domain: str, result: str | None, via: str | None = None) -> None:
@@ -783,31 +697,29 @@ def _set_page_result(user_id: int, domain: str, result: str | None, via: str | N
         db.close()
 
 
-def _open_in_app(url: str, user_id: int, domain: str, gmail: bool = False) -> None:
-    """Show the unsubscribe page (or Gmail) in a Simplispace window and read the result."""
+def _open_in_app(url: str, user_id: int, domain: str) -> None:
+    """Show the email in Gmail in a Simplispace window and read the result there, or on the
+    sender's own site if Gmail hands over to it."""
     # left_gmail: Gmail handed over to the sender's own website ("Go to website").
     last = {"result": None, "left_gmail": False}
 
     def on_page(page_url: str, text: str) -> bool:
-        if gmail and unsubscribe.on_google(page_url):
+        if unsubscribe.on_google(page_url):
             if unsubscribe.gmail_done(text):
                 last["result"] = "success"
                 _set_page_result(user_id, domain, "success")
                 return True
             return False
-        if page_url.startswith(("http://127.0.0.1", "http://localhost")):
-            return False  # our own hand-off page, before it posts to the sender
         if not page_url.startswith(("http://", "https://")):
             return False  # blank page between two sites
-        if gmail:
-            if not unsubscribe.is_unsubscribe_page(page_url, text):
-                return False  # some other link in the email
-            last["left_gmail"] = True
+        if not unsubscribe.is_unsubscribe_page(page_url, text):
+            return False  # some other link in the email
+        last["left_gmail"] = True
         result = unsubscribe.classify_page(text)
         if result:
             last["result"] = result
         if result == "success":
-            _set_page_result(user_id, domain, "success", "in_app" if gmail else None)
+            _set_page_result(user_id, domain, "success", "in_app")
             return True  # done: close the window shortly
         return False  # failed pages can be bot checks that pass on reload; keep watching
 
@@ -816,16 +728,14 @@ def _open_in_app(url: str, user_id: int, domain: str, gmail: bool = False) -> No
         # goes back as it was. A sender's page that didn't say: later mail shows if it worked.
         if last["result"] == "success":
             return
-        if gmail and not last["left_gmail"]:
+        if not last["left_gmail"]:
             _set_page_result(user_id, domain, None)
         else:
             _set_page_result(
-                user_id, domain, "failed" if last["result"] == "failed" else "visited", "in_app" if gmail else None
+                user_id, domain, "failed" if last["result"] == "failed" else "visited", "in_app"
             )
 
-    title = f"Gmail – {domain}" if gmail else f"Unsubscribe from {domain}"
-    script = unsubscribe.GMAIL_NOTICES if gmail else unsubscribe.PAGE_TEXT
-    unsubscribe.in_app_opener(url, title, on_page, on_closed, script)
+    unsubscribe.in_app_opener(url, f"Gmail – {domain}", on_page, on_closed, unsubscribe.GMAIL_NOTICES)
 
 
 # --- Unsubscribe by email, for senders with no unsubscribe option --------------
@@ -893,6 +803,7 @@ def draft_unsubscribe_email(domain: Domain, db: Session = Depends(get_db)):
         "body": f"{draft['body']}\n\nMy email address: {user.email}",
         "ai": note is None,
         "note": note,
+        "other_company": scoring.root_domain(to.split("@")[1]) != scoring.root_domain(domain),
         "can_send": gmail.can_send(creds),
     }
 

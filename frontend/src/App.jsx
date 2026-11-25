@@ -487,6 +487,9 @@ function EmailUnsubscribe({ service, account, saved, onDone, onBusy }) {
       {!draft.ai && (
         <p className="no-unsub">AI couldn’t write this one ({draft.note}) so here is a standard email you can edit.</p>
       )}
+      {draft.other_company && (
+        <p className="no-unsub">This reply address belongs to a different company than {service.domain}. Check it before sending.</p>
+      )}
       <p className="muted small">To: {draft.to}</p>
       <label className="muted small" htmlFor="email-subject">Subject</label>
       <input id="email-subject" value={draft.subject} maxLength={200} onChange={edit("subject")} />

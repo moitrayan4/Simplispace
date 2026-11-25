@@ -1,3 +1,5 @@
+import shutil
+import time
 import urllib.parse
 import urllib.request
 
@@ -5,16 +7,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
-from .. import ai, gmail, security, sync
+from .. import ai, gmail, icons, security, session, sync
 from ..config import settings
-from ..db import get_db
+from ..db import compact, get_db
 from ..models import AIClassification, Decision, HealthSnapshot, Message, UnsubAttempt, User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ponytail: in-memory state -> PKCE verifier store. Single-process desktop app,
 # so a dict is enough; move to a shared store only if the API goes multi-worker.
-_pending_states: dict[str, str] = {}
+_pending_states: dict[str, tuple[str, float]] = {}  # state -> (verifier, expires)
+_SIGN_IN_TIME = 15 * 60
 
 
 def active_user(db: Session) -> User | None:
@@ -57,7 +60,7 @@ def login(send: bool = False, db: Session = Depends(get_db)):
     url, state, code_verifier = gmail.authorization_url(send=bool(user), email=user.email if user else None)
     while len(_pending_states) >= 20:  # abandoned sign-ins: drop the oldest
         _pending_states.pop(next(iter(_pending_states)))
-    _pending_states[state] = code_verifier
+    _pending_states[state] = (code_verifier, time.time() + _SIGN_IN_TIME)
     return RedirectResponse(url)
 
 
@@ -69,12 +72,14 @@ def callback(
     db: Session = Depends(get_db),
 ):
     # state is the CSRF check for sign-in: it must be one this app just issued.
-    if state not in _pending_states:
+    code_verifier, expires = _pending_states.get(state, ("", 0.0))
+    if expires < time.time():
+        _pending_states.pop(state, None)
         raise HTTPException(400, "Invalid OAuth state.")
     if error or not code:  # e.g. the user pressed Cancel on Google's consent screen
         _pending_states.pop(state, None)
         return RedirectResponse(f"{settings.frontend_origin}/")
-    code_verifier = _pending_states.pop(state)
+    _pending_states.pop(state)
 
     try:
         creds = gmail.exchange_code(code, state, code_verifier)
@@ -143,6 +148,7 @@ def logout(db: Session = Depends(get_db)):
         user.signed_in = False
         db.commit()
         sync.bump_data_version()
+    session.signed_out()
     return {"logged_out": True}
 
 
@@ -155,4 +161,7 @@ def delete_account(db: Session = Depends(get_db)):
     if user:
         _revoke(user)  # best effort; local deletion below is the guarantee
         purge_user(db, user)
+        compact(db)  # so nothing is left in the file's free space
+        shutil.rmtree(icons.CACHE_DIR, ignore_errors=True)  # their names are the user's senders
+    session.signed_out()
     return {"deleted": True}

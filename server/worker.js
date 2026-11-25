@@ -154,14 +154,17 @@ async function fromWebsite(website) {
   if (!/text\/html/.test(res.headers.get("content-type") || "")) return null;
   let html = "";
   const reader = res.body.getReader(), text = new TextDecoder();
-  while (html.length < 120_000) {
+  while (html.length < 80_000) {
     const { done, value } = await reader.read();
     if (done) break;
     html += text.decode(value, { stream: true });
   }
   reader.cancel().catch(() => {});
-  const title = /<title[^>]*>([^<]{1,300})/i.exec(html)?.[1] || "";
-  const meta = (html.match(/<meta\s(?:"[^"]*"|'[^']*'|[^>"'])*>/gi) || []).find((m) => /(name|property)=["']?(og:)?description/i.test(m)) || "";
+  // The page may be hostile: plain searches over short pieces, so it can't make this slow.
+  const open = html.slice(html.search(/<title/i) >>> 0).slice(0, 700);
+  const title = open.slice(open.indexOf(">") + 1).split("<", 1)[0].slice(0, 300);
+  const metas = html.split(/<meta\s/i).slice(1, 80).map((m) => /^(?:"[^"]*"|'[^']*'|[^>"'])*/.exec(m.slice(0, 1500))[0]);
+  const meta = metas.find((m) => /(name|property)=["']?(og:)?description/i.test(m)) || "";
   const description = /content="([^"]*)"|content='([^']*)'/i.exec(meta)?.slice(1).find(Boolean) || "";
   return clean(`${title}. ${description}`, 400) || null;
 }
@@ -276,7 +279,8 @@ async function ask(task, evidence, env) {
 export default {
   async fetch(request, env) {
     try {
-      const { pathname } = new URL(request.url);
+      const { pathname, protocol } = new URL(request.url);
+      if (protocol !== "https:") throw new Refused(403, "https_only"); // sign-in tokens never travel in the clear
       if (pathname === "/health" && request.method === "GET") return reply(200, { ok: true });
       const task = Object.hasOwn(TASKS, pathname) && TASKS[pathname];
       if (!task || request.method !== "POST") throw new Refused(404, "not_found");

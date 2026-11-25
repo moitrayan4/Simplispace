@@ -16,7 +16,7 @@ GMAIL = "https://mail.google.com/mail/#all/1"
 SHOP = "https://shop.com/unsubscribe"
 
 
-def run(*pages, gmail=True, via="gmail"):
+def run(*pages, via="gmail"):
     """Open a window, show it each (url, text), close it; return the stored decision."""
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
@@ -36,7 +36,7 @@ def run(*pages, gmail=True, via="gmail"):
         on_closed()
 
     unsubscribe.in_app_opener = opener
-    services._open_in_app(GMAIL if gmail else SHOP, user.id, "shop.com", gmail=gmail)
+    services._open_in_app(GMAIL, user.id, "shop.com")
     unsubscribe.in_app_opener = None
     db.expire_all()
     row = db.query(Decision).first()
@@ -65,10 +65,6 @@ def test_other_links_are_not_an_unsubscribe():
     assert run((GMAIL, ""), ("https://shop.com/cart", basket)) is None
     assert run((GMAIL, ""), ("https://shop.com/unsubscribe", "You were removed from our mailing list")) == ("page_confirmed", "in_app")
     assert run((GMAIL, "")) is None
-
-
-def test_unclear_sender_page_is_checked_from_the_mailbox():
-    assert run((SHOP, "Manage preferences"), gmail=False, via="in_app") == ("checking", "in_app")
 
 
 if __name__ == "__main__":

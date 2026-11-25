@@ -90,13 +90,13 @@ def open_external(url: str) -> None:
     """Open a page or mail draft for the user: in a Simplispace window when running as
     the desktop app, otherwise (development in a browser) in the default browser/mail app."""
     scheme = urllib.parse.urlsplit(url).scheme.lower()
-    if scheme not in ("https", "http", "mailto"):
-        raise ValueError("Unsupported unsubscribe link.")
-    if in_app_opener and scheme in ("https", "http"):
+    if scheme != "https":
+        raise ValueError("Only https links can be opened.")
+    if in_app_opener:
         in_app_opener(url, "Simplispace", lambda *_: False, lambda: None, PAGE_TEXT)
         return
     if not webbrowser.open(url):
-        raise ValueError("Could not open your browser or mail app.")
+        raise ValueError("Could not open your browser.")
 
 
 # --- Did it work? ------------------------------------------------------------
@@ -195,7 +195,7 @@ in_app_opener = None
 
 # No backslashes or line breaks in these scripts: the window library passes them through
 # eval("...") without escaping those, so a "\n" becomes a syntax error on every page.
-PAGE_TEXT = "document.body ? document.body.innerText : ''"
+PAGE_TEXT = "(document.body ? document.body.innerText : '').slice(0, 50000)"
 # Gmail announces actions in small notices marked role="alert" ("Unsubscribed from…",
 # "You blocked…", "Message sent"). Reading only those, never the open email, avoids
 # false matches on words inside someone's message. If Gmail hands over to the sender's
@@ -219,20 +219,6 @@ def gmail_done(notices: str) -> bool:
     text = (notices or "").lower()
     return any(p in text for p in _GMAIL_DONE)
 
-
-def gmail_compose_url(mailto: str, account: str) -> str:
-    """Gmail web compose window pre-filled from a mailto: unsubscribe address."""
-    parts = urllib.parse.urlsplit(mailto)
-    query = dict(urllib.parse.parse_qsl(parts.query))
-    fields = {
-        "authuser": account,
-        "view": "cm",
-        "fs": "1",
-        "to": urllib.parse.unquote(parts.path),
-        "su": query.get("subject", "Unsubscribe"),
-        "body": query.get("body", "Please unsubscribe me from this mailing list."),
-    }
-    return "https://mail.google.com/mail/?" + urllib.parse.urlencode(fields)
 
 _FAILED = (
     "post required", '"success":false', '"success": false', "forbidden", "access denied",
