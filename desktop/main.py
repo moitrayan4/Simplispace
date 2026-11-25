@@ -1,7 +1,7 @@
 """Simplispace desktop app (dev + PyInstaller-frozen).
 
 Runs the FastAPI backend in-process (it also serves the built frontend) and shows
-it in a native window. Google sign-in uses the system browser; unsubscribe pages,
+it in a native window. Google sign-in runs in the main window; unsubscribe pages,
 Gmail and other links open in Simplispace windows (see _open_in_app).
 
 Dev:     python desktop/main.py      (after: cd frontend && npm run build)
@@ -143,20 +143,42 @@ from app.main import app as fastapi_app  # noqa: E402
 # API are always one origin.
 API = "http://localhost:8000"
 
+_action_windows = set()  # windows whose popups must stay inside Simplispace
+
+
+def _keep_popups_in_app():
+    """Links that open a new tab (Gmail's "Go to website") load in the same Simplispace
+    window, so the app can still see the result. The main window is left alone."""
+    from webview.platforms.edgechromium import EdgeChrome
+
+    original = EdgeChrome.on_new_window_request
+
+    def on_new_window_request(self, sender, args):
+        uri = str(args.get_Uri())
+        if self.pywebview_window in _action_windows and uri.lower().startswith(("https://", "http://")):
+            args.set_Handled(True)
+            self.load_url(uri)
+        else:
+            original(self, sender, args)
+
+    EdgeChrome.on_new_window_request = on_new_window_request
+
+
 def _open_in_app(url, title, on_page, on_closed, script="document.body ? document.body.innerText : ''"):
     """Open a page (an unsubscribe page, or Gmail) in a Simplispace window and report
     what it shows, so the app can acknowledge the result itself.
 
     The app's own JavaScript can't read another site's page, but the window's host
     can. `script` picks what to read (the whole page, or just Gmail's notices). It is
-    re-read every second, which also catches pages that update without reloading.
+    re-read twice a second, which also catches pages that update without reloading.
     """
     win = webview.create_window(title, url, width=980, height=760)
+    _action_windows.add(win)
     state = {"open": True}
 
     def watch():
         while state["open"]:
-            time.sleep(1)
+            time.sleep(0.5)  # short notices
             try:
                 text = win.evaluate_js(script) or ""
                 current = win.get_current_url() or ""
@@ -168,6 +190,7 @@ def _open_in_app(url, title, on_page, on_closed, script="document.body ? documen
 
     def closed():
         state["open"] = False
+        _action_windows.discard(win)
         on_closed()
 
     win.events.shown += lambda: threading.Thread(target=watch, daemon=True).start()
@@ -193,6 +216,7 @@ def main():
         sys.exit(f"Frontend build missing at {DIST}")
 
     unsubscribe_actions.in_app_opener = _open_in_app
+    _keep_popups_in_app()
     threading.Thread(target=_run_api, daemon=True).start()
     if not _wait_for_api():
         # No console in the packaged app, so say it in a normal Windows message box.

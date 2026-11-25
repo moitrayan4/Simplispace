@@ -718,7 +718,7 @@ p.notice {
 }
 .status-pill.needs_answer, .status-pill.in_progress { background: rgba(255, 149, 0, 0.16); color: var(--orange-text); }
 .status-pill.page_confirmed { background: rgba(52, 199, 89, 0.16); color: var(--green-text); }
-.status-pill.page_failed { background: rgba(255, 59, 48, 0.14); color: var(--red-text); }
+.status-pill.page_failed, .status-pill.rejected, .status-pill.auto_reply { background: rgba(255, 59, 48, 0.14); color: var(--red-text); }
 
 /* success, empty state, 404, no sideways scroll */
 html, body { overflow-x: clip; }
@@ -788,3 +788,20 @@ h1, h2, p, li { overflow-wrap: break-word; }
 .recent-emails li.unread .recent-subject { font-weight: 700; }
 .recent-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-emails .small { flex: 0 0 auto; }
+
+/* Unsubscribe by email */
+.email-draft { display: grid; gap: 8px; }
+.email-draft p { margin: 0; }
+.email-draft input, .email-draft textarea {
+  width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35)); background: transparent; color: inherit; font: inherit; font-size: 14px;
+}
+.email-draft textarea { resize: vertical; min-height: 120px; line-height: 1.45; }
+.email-send { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.modal:has(.email-draft) { max-height: calc(100dvh - 32px); overflow-y: auto; }
+
+/* AI second opinion on a card */
+.ai-opinion { display: grid; gap: 6px; margin: 0 0 9px; padding: 10px 12px; border-radius: 12px; background: rgba(0, 122, 255, 0.08); font-size: 12.5px; line-height: 1.45; }
+.ai-opinion p { margin: 0; overflow-wrap: anywhere; }
+.ai-opinion .ai-tag { font-size: 12px; }
+.ai-opinion strong { display: block; font-size: 11px; opacity: 0.75; }

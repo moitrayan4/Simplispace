@@ -48,7 +48,7 @@
       </div>
       <div class="card">
         <h2>Private by design</h2>
-        <p>Read-only Gmail access. Simplispace reads email details, never message bodies, and keeps everything on your own computer.</p>
+        <p>Read-only Gmail access by default. Simplispace reads email details, never message bodies, and stores your data on your own computer.</p>
       </div>
     </section>
 
@@ -58,9 +58,10 @@
         Simplispace asks Google for <strong>read-only</strong> access to Gmail
         (<code>https://www.googleapis.com/auth/gmail.readonly</code>). It uses that access only to read each
         email’s sender, subject, date, labels and unsubscribe header, so it can group your mail by sender,
-        score each sender, and offer unsubscribe options. It never reads or stores the content of your emails,
-        never sends or deletes email, and never sends your data to the developer or anyone else.
-        Everything is stored on your computer. See the <a href="privacy.html">Privacy Policy</a> for details.
+        score each sender, and offer unsubscribe options. It never reads or stores the content of your emails and never deletes email.
+        Sending is a separate, optional permission (<code>https://www.googleapis.com/auth/gmail.send</code>), used only
+        for unsubscribe emails you check and press Send on. Your data is stored on your computer; optional AI features
+        send limited details about a sender, as the privacy policy explains. See the <a href="privacy.html">Privacy Policy</a> for details.
       </p>
       <p class="note">
         Simplispace’s use and transfer of information received from Google APIs will adhere to the

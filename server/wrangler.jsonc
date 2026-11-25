@@ -1,0 +1,20 @@
+{
+  "name": "simplispace-ai",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "send_metrics": false,
+  // No request logs: nothing about users' senders is kept.
+  "observability": { "enabled": false },
+  "vars": {
+    "AI_ENABLED": "true", // "false" + redeploy = kill switch
+    "GOOGLE_CLIENT_ID": "208738504577-c5bjbq0lhocu82up4c3j5ji11g20bn19.apps.googleusercontent.com", // the app's Desktop client ID (public; NOT the client secret)
+    "GROQ_MODEL": "openai/gpt-oss-120b",
+    "USER_DAILY": "30",
+    "USER_MINUTE": "5",
+    "GLOBAL_DAILY": "900", // keep below your Groq plan's limits
+    "GLOBAL_MINUTE": "25"
+  },
+  "durable_objects": { "bindings": [{ "name": "QUOTA", "class_name": "Quota" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Quota"] }]
+  // Secrets, never in this file: GROQ_API_KEY, QUOTA_SECRET  (npx wrangler secret put NAME)
+}

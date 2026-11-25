@@ -167,12 +167,17 @@ def test_offline_icon_lookup_is_not_cached_as_missing():
         offline = urllib.error.URLError(OSError("getaddrinfo failed"))
         with mock.patch("urllib.request.urlopen", side_effect=offline):
             assert icons.get_icon("example-shop.com") is None
-        assert not (Path(tmp) / "example-shop.com.none").exists()  # retried once online
+        assert not list(Path(tmp).iterdir())  # nothing remembered: retried once online
+
+        busy = urllib.error.HTTPError("u", 503, "Busy", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=busy):
+            assert icons.get_icon("example-shop.com") is None
+        assert not list(Path(tmp).iterdir())
 
         not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
         with mock.patch("urllib.request.urlopen", side_effect=not_found):
             assert icons.get_icon("example-shop.com") is None
-        assert (Path(tmp) / "example-shop.com.none").exists()  # a real miss is remembered
+        assert [f.name for f in Path(tmp).iterdir()] == ["example-shop.com.v2.none"]  # a real miss is remembered
 
 
 def test_pages_do_not_skip_messages():

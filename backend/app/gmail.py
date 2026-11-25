@@ -1,40 +1,22 @@
+import base64
 import json
 import os
-import subprocess
-import sys
-import webbrowser
+import time
+from email.message import EmailMessage
 
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport.requests import Request
+from google.oauth2 import id_token as google_id_token
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from .config import settings
 
 
-class _SystemBrowser(webbrowser.BaseBrowser):
-    """Launch Google OAuth through the operating system's default browser."""
-
-    def open(self, url, new=0, autoraise=True):
-        try:
-            if sys.platform == "darwin":
-                subprocess.Popen(
-                    ["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            elif os.name == "nt":
-                os.startfile(url)  # type: ignore[attr-defined]
-            else:
-                subprocess.Popen(
-                    ["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            return True
-        except (OSError, subprocess.SubprocessError) as error:
-            raise RuntimeError(
-                "Could not open the system browser for Google sign-in. "
-                "Set a default browser and try again."
-            ) from error
-
-
-webbrowser.register("simplispace-system", None, _SystemBrowser())
+# Google lets a Desktop client return to any localhost address, so the app's own API
+# receives the sign-in and nothing needs registering in the Cloud Console.
+REDIRECT_URI = "http://localhost:8000/auth/callback"
 
 
 def _client_config() -> dict:
@@ -44,29 +26,59 @@ def _client_config() -> dict:
             "client_secret": settings.google_client_secret,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": ["http://localhost"],
+            "redirect_uris": [REDIRECT_URI],
         }
     }
 
 
-def authorize_desktop() -> Credentials:
-    """Authorize in the system browser and receive the result on a loopback port."""
-    flow = InstalledAppFlow.from_client_config(
-        _client_config(), scopes=settings.scopes, autogenerate_code_verifier=True
+# Google lets users untick permissions, and may list more than was asked for. The library
+# treats any difference as a crash; exchange_code checks for what is needed instead.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
+
+class GmailNotAllowed(RuntimeError):
+    """The user signed in but didn't tick the Gmail permission."""
+
+
+# Lets the app send, but not read, change or delete mail. Asked for only on first use.
+SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
+
+def login_scopes(send: bool = False) -> list[str]:
+    # "openid" lets the AI server check who is asking. It gives no access to mail, and
+    # is only requested when this copy of the app has an AI server.
+    openid = ["openid"] if settings.ai_server_url.strip() else []
+    return openid + settings.scopes + ([SEND_SCOPE] if send else [])
+
+
+def make_flow(state: str | None = None, send: bool = False) -> Flow:
+    flow = Flow.from_client_config(
+        _client_config(), scopes=login_scopes(send), state=state
     )
-    return flow.run_local_server(
-        host="127.0.0.1",
-        port=0,
-        open_browser=True,
-        browser="simplispace-system",
-        redirect_uri_trailing_slash=False,
-        authorization_prompt_message="Opening Google sign-in in your browser…",
-        success_message="Google sign-in is complete. You can return to Simplispace.",
-        timeout_seconds=300,
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent",
-    )
+    flow.redirect_uri = REDIRECT_URI
+    return flow
+
+
+def authorization_url(send: bool = False, email: str | None = None) -> tuple[str, str, str]:
+    flow = make_flow(send=send)
+    hint = {"login_hint": email} if email else {}
+    url, state = flow.authorization_url(access_type="offline", prompt="consent", **hint)
+    # PKCE verifier must survive to the token exchange (separate request).
+    return url, state, flow.code_verifier
+
+
+def exchange_code(code: str, state: str, code_verifier: str | None) -> Credentials:
+    flow = make_flow(state=state)
+    flow.code_verifier = code_verifier
+    token = flow.fetch_token(code=code)
+    granted = token.get("scope") or []
+    granted = granted.split() if isinstance(granted, str) else list(granted)
+    if not set(settings.scopes) <= set(granted):
+        raise GmailNotAllowed
+    # Save only what this app uses and was really given, so later refreshes are accepted.
+    saved = json.loads(flow.credentials.to_json())
+    saved["scopes"] = [s for s in login_scopes(send=True) if s in granted]
+    return credentials_from_json(json.dumps(saved))
 
 
 def credentials_to_json(creds: Credentials) -> str:
@@ -74,7 +86,60 @@ def credentials_to_json(creds: Credentials) -> str:
 
 
 def credentials_from_json(data: str) -> Credentials:
-    return Credentials.from_authorized_user_info(json.loads(data), settings.scopes)
+    # Scopes come from the saved sign-in: refreshing an older one with scopes it was
+    # never granted would make Google refuse it.
+    return Credentials.from_authorized_user_info(json.loads(data))
+
+
+def has_openid(creds: Credentials) -> bool:
+    return "openid" in (creds.scopes or [])
+
+
+def can_send(creds: Credentials) -> bool:
+    return SEND_SCOPE in (creds.scopes or [])
+
+
+# Marks our own emails, so the sync doesn't count them as the user writing to a sender.
+SENT_MARK = "X-Simplispace"
+
+
+def send_email(creds: Credentials, to: str, subject: str, body: str) -> None:
+    message = EmailMessage()  # refuses line breaks in headers
+    message["To"], message["Subject"], message[SENT_MARK] = to, subject, "unsubscribe"
+    message.set_content(body)
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    build_gmail(creds).users().messages().send(userId="me", body={"raw": raw}).execute()
+
+
+class SignInNeeded(RuntimeError):
+    """This sign-in can't prove who the user is; signing in again fixes it."""
+
+
+# account email -> (token, expiry). Memory only; the tokens last about an hour.
+_id_tokens: dict[str, tuple[str, float]] = {}
+
+
+def forget_id_token(email: str) -> None:
+    _id_tokens.pop(email, None)
+
+
+def id_token(email: str, creds: Credentials) -> str:
+    """A Google ID token: says who the user is and cannot be used to read mail. The
+    Gmail access token is never sent to the AI server."""
+    if not has_openid(creds):
+        raise SignInNeeded("Log out and sign in again to use AI. Your senders and choices are kept.")
+    token, expires = _id_tokens.get(email, ("", 0.0))
+    if token and time.time() < expires - 120:
+        return token
+    try:
+        creds.refresh(Request())
+        claims = google_id_token.verify_oauth2_token(
+            creds.id_token, Request(), creds.client_id, clock_skew_in_seconds=60
+        )
+    except (GoogleAuthError, ValueError, TypeError) as e:
+        raise SignInNeeded("Couldn't confirm your Google sign-in. Check your connection, then sign in again.") from e
+    _id_tokens[email] = (creds.id_token, float(claims["exp"]))
+    return creds.id_token
 
 
 def build_gmail(creds: Credentials):

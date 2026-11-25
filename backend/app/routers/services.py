@@ -1,11 +1,13 @@
 from collections import Counter, deque
 import html
 import json
+import re
 import secrets
 import threading
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
+from email.utils import parseaddr
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
@@ -14,14 +16,13 @@ from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
 from httplib2 import ServerNotFoundError
 from google.auth.exceptions import TransportError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import ai, gmail, icons, scoring, security, sync, unsubscribe
-from ..config import settings
 from ..db import SessionLocal, get_db
-from ..models import AIClassification, Decision, HealthSnapshot, Message, User
+from ..models import AIClassification, Decision, HealthSnapshot, Message, UnsubAttempt, User
 from .auth import active_user
 
 # Sender domains as stored by sync: lowercase host names. Anything else is rejected (422).
@@ -84,6 +85,7 @@ def _worker(user_id: int, page_token: str | None, page: int):
         total_fetched = 0
         total_added = 0
         if page == 1 and _incremental(db, user_id):
+            _check_replies(db, user_id)
             return
         while True:
             if not _sync["running"]:
@@ -131,6 +133,7 @@ def _worker(user_id: int, page_token: str | None, page: int):
                 db.commit()
                 sync.bump_data_version()
             if not page_token:
+                _check_replies(db, user_id)
                 break
             page += 1
             _sync["phase"] = "background"
@@ -258,19 +261,25 @@ def set_ai_preference(body: AIPreferenceIn, db: Session = Depends(get_db)):
     """Persist explicit per-account consent for sending minimal evidence to a model."""
     user = _require_user(db)
     if body.enabled and not ai.provider_ready():
-        raise HTTPException(503, "AI is not configured. Set AI_MODEL and a valid AI_BASE_URL; hosted providers also need AI_API_KEY.")
+        raise HTTPException(503, ai.setup_message() or "AI is not configured.")
     user.ai_enabled = body.enabled
     if not body.enabled:
         db.query(AIClassification).filter_by(user_id=user.id).delete(synchronize_session=False)
     db.commit()
     sync.bump_data_version()
-    return {
-        "ai_enabled": user.ai_enabled,
-        "ai_available": ai.provider_ready(),
-        "ai_setup_hint": ai.setup_message(),
-        "ai_provider": ai.provider_label(),
-        "ai_model": settings.ai_model.strip() if ai.provider_ready() else None,
-    }
+    return ai.account_fields(user)
+
+
+def _ai_id_token(user: User) -> str | None:
+    """Proof of sign-in for the AI server; not needed with the user's own AI key."""
+    if not ai.uses_server():
+        return None
+    try:
+        return gmail.id_token(user.email, gmail.credentials_from_json(security.decrypt(user.encrypted_token)))
+    except gmail.SignInNeeded as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:  # no usable saved sign-in
+        raise HTTPException(409, "Reconnect Gmail to use AI.") from exc
 
 
 @router.post("/services/{domain}/ai-classification")
@@ -292,16 +301,17 @@ def classify_ambiguous_service(domain: Domain, db: Session = Depends(get_db)):
     messages = [row for row in rows if row.sender_domain == domain]
     request_data, digest = ai.make_input(service, messages)
     saved = db.query(AIClassification).filter_by(user_id=user.id, domain=domain).first()
-    if saved and saved.input_hash == digest and saved.status != "failed":
+    if saved and saved.input_hash == digest and saved.status != "failed" and datetime.utcnow() - saved.created_at < ai.OPINION_LASTS:
         return {
             "category": saved.suggested_category if saved.status == "applied" else saved.rule_category,
             "rule_category": saved.rule_category,
             "suggested_category": saved.suggested_category,
             "confidence": saved.confidence,
-            "explanation": saved.explanation,
+            **ai.details(saved.explanation),
             "status": saved.status,
         }
 
+    id_token = _ai_id_token(user)
     now = time.monotonic()
     while _ai_call_times and now - _ai_call_times[0] >= 60:
         _ai_call_times.popleft()
@@ -309,14 +319,14 @@ def classify_ambiguous_service(domain: Domain, db: Session = Depends(get_db)):
         raise HTTPException(429, "AI review limit reached. Try again in a minute.")
     _ai_call_times.append(now)
     try:
-        result = ai.classify(request_data)
+        result = ai.classify(request_data, id_token)
     except ai.AIUnavailable as exc:
         rule_category = service.rule_category or service.category
         if saved is None:
             saved = AIClassification(
                 user_id=user.id, domain=domain, input_hash=digest,
                 rule_category=rule_category, suggested_category=rule_category,
-                confidence=0.0, explanation="", status="failed", model=settings.ai_model.strip(),
+                confidence=0.0, explanation="", status="failed", model=ai.model_name(),
             )
             db.add(saved)
         else:
@@ -326,7 +336,7 @@ def classify_ambiguous_service(domain: Domain, db: Session = Depends(get_db)):
             saved.confidence = 0.0
             saved.explanation = ""
             saved.status = "failed"
-            saved.model = settings.ai_model.strip()
+            saved.model = ai.model_name()
             saved.created_at = datetime.utcnow()
         db.commit()
         sync.bump_data_version()
@@ -355,7 +365,7 @@ def classify_ambiguous_service(domain: Domain, db: Session = Depends(get_db)):
         "rule_category": service.rule_category or service.category,
         "suggested_category": result["suggested_category"],
         "confidence": result["confidence"],
-        "explanation": result["explanation"],
+        **ai.details(result["explanation"]),
         "status": result["status"],
     }
 
@@ -490,6 +500,14 @@ def _decision_json(
     return out
 
 
+def _attempt(db: Session, user_id: int, domain: str, method: str) -> UnsubAttempt:
+    row = db.query(UnsubAttempt).filter_by(user_id=user_id, domain=domain, method=method).first()
+    if not row:
+        row = UnsubAttempt(user_id=user_id, domain=domain, method=method, failed=False)
+        db.add(row)
+    return row
+
+
 def _get_decision(db: Session, user: User, domain: str) -> Decision | None:
     return db.query(Decision).filter(Decision.user_id == user.id, Decision.domain == domain).first()
 
@@ -525,6 +543,9 @@ def set_decision(domain: Domain, body: DecisionIn, db: Session = Depends(get_db)
         raise HTTPException(409, "Already unsubscribed from this sender.")
     if body.decision is None:
         if row:
+            step = unsubscribe.STEP_OF.get(row.unsubscribed_via or "")
+            if step and _decision_json(row, db, user)["status"] in unsubscribe.FAILED_STATUSES:
+                _attempt(db, user.id, domain, step).failed = True
             db.delete(row)
             db.commit()
         return None
@@ -596,7 +617,21 @@ def _gmail_url(db: Session, user: User, domain: str) -> str | None:
 @router.get("/unsubscribe/{domain}")
 def unsubscribe_options(domain: Domain, db: Session = Depends(get_db)):
     user = _require_user(db)
-    return {**_unsubscribe_options(db, user, domain), "gmail": bool(_gmail_url(db, user, domain))}
+    options = {**_unsubscribe_options(db, user, domain), "gmail": bool(_gmail_url(db, user, domain))}
+    if not options["link"] and not options["mailto"]:
+        options["steps"], options["step"] = _steps(db, user, domain)
+    return options
+
+
+def _steps(db: Session, user: User, domain: str) -> tuple[list[str], str]:
+    """Ways to stop a sender that has no unsubscribe option, and the first that hasn't failed."""
+    try:
+        can_email = not unsubscribe.is_no_reply(_email_sender(db, user, domain)[1])
+    except HTTPException:
+        can_email = False
+    steps = [s for s in unsubscribe.STEPS if s != "email" or can_email]
+    failed = {a.method for a in db.query(UnsubAttempt).filter_by(user_id=user.id, domain=domain, failed=True)}
+    return steps, next((s for s in steps if s not in failed), steps[-1])
 
 
 # One-time links for the browser hand-off page, so another website can't send the
@@ -732,12 +767,17 @@ def confirm_unsubscribe(domain: Domain, body: UnsubscribeIn, request: Request, d
     return {**_decision_json(row, db, user), "fallback_reason": fallback_reason}
 
 
-def _set_page_result(user_id: int, domain: str, result: str) -> None:
+def _set_page_result(user_id: int, domain: str, result: str | None, via: str | None = None) -> None:
+    """Record what the window showed; None means nothing was done, so forget the attempt."""
     db = SessionLocal()
     try:
         row = db.query(Decision).filter(Decision.user_id == user_id, Decision.domain == domain).first()
         if row and row.unsubscribed_at:  # skip if the user undid it meanwhile
-            row.page_result = result
+            if result is None:
+                db.delete(row)
+            else:
+                row.page_result = result
+                row.unsubscribed_via = via or row.unsubscribed_via
             db.commit()
     finally:
         db.close()
@@ -745,10 +785,11 @@ def _set_page_result(user_id: int, domain: str, result: str) -> None:
 
 def _open_in_app(url: str, user_id: int, domain: str, gmail: bool = False) -> None:
     """Show the unsubscribe page (or Gmail) in a Simplispace window and read the result."""
-    last = {"result": None}
+    # left_gmail: Gmail handed over to the sender's own website ("Go to website").
+    last = {"result": None, "left_gmail": False}
 
     def on_page(page_url: str, text: str) -> bool:
-        if gmail:
+        if gmail and unsubscribe.on_google(page_url):
             if unsubscribe.gmail_done(text):
                 last["result"] = "success"
                 _set_page_result(user_id, domain, "success")
@@ -756,21 +797,189 @@ def _open_in_app(url: str, user_id: int, domain: str, gmail: bool = False) -> No
             return False
         if page_url.startswith(("http://127.0.0.1", "http://localhost")):
             return False  # our own hand-off page, before it posts to the sender
+        if not page_url.startswith(("http://", "https://")):
+            return False  # blank page between two sites
+        if gmail:
+            if not unsubscribe.is_unsubscribe_page(page_url, text):
+                return False  # some other link in the email
+            last["left_gmail"] = True
         result = unsubscribe.classify_page(text)
         if result:
             last["result"] = result
         if result == "success":
-            _set_page_result(user_id, domain, "success")
+            _set_page_result(user_id, domain, "success", "in_app" if gmail else None)
             return True  # done: close the window shortly
         return False  # failed pages can be bot checks that pass on reload; keep watching
 
     def on_closed() -> None:
-        if last["result"] != "success":
-            _set_page_result(user_id, domain, "failed" if last["result"] == "failed" else "unclear")
+        # Never ask the user. Closed without Gmail confirming: nothing happened, so the sender
+        # goes back as it was. A sender's page that didn't say: later mail shows if it worked.
+        if last["result"] == "success":
+            return
+        if gmail and not last["left_gmail"]:
+            _set_page_result(user_id, domain, None)
+        else:
+            _set_page_result(
+                user_id, domain, "failed" if last["result"] == "failed" else "visited", "in_app" if gmail else None
+            )
 
     title = f"Gmail – {domain}" if gmail else f"Unsubscribe from {domain}"
     script = unsubscribe.GMAIL_NOTICES if gmail else unsubscribe.PAGE_TEXT
     unsubscribe.in_app_opener(url, title, on_page, on_closed, script)
+
+
+# --- Unsubscribe by email, for senders with no unsubscribe option --------------
+# The AI drafts it, the user reads and can change it, and it is sent from their Gmail
+# only when they press Send. Sending is never automatic or in bulk.
+_EMAILS_PER_DAY = 20
+_send_lock = threading.Lock()  # a double click can't send twice
+_ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
+
+
+def _email_sender(db: Session, user: User, domain: str):
+    """Check that this sender can be emailed, and find the address that answers for it."""
+    row = _get_decision(db, user, domain)
+    if row and row.unsubscribed_at:
+        raise HTTPException(409, "Already unsubscribed from this sender.")
+    options = _unsubscribe_options(db, user, domain)
+    if options["link"] or options["mailto"]:
+        raise HTTPException(409, "This sender has an unsubscribe option. Use that instead.")
+    msg = (
+        db.query(Message).filter(Message.user_id == user.id, Message.sender_domain == domain)
+        .order_by(Message.date.desc()).first()
+    )
+    if not msg:
+        raise HTTPException(404, "Sender not found.")
+    try:
+        creds = gmail.credentials_from_json(security.decrypt(user.encrypted_token))
+    except Exception as e:  # no usable saved sign-in
+        raise HTTPException(409, "Reconnect Gmail first.") from e
+    to = msg.sender_email
+    try:
+        full = gmail.build_gmail(creds).users().messages().get(
+            userId="me", id=msg.gmail_id, format="metadata", metadataHeaders=["Reply-To"]).execute()
+        to = parseaddr(sync._headers(full).get("reply-to", ""))[1] or to
+    except (HttpError, GoogleAuthError, ServerNotFoundError, OSError):
+        pass  # use the stored From address
+    to = (to or "").lower()
+    if not _ADDRESS.fullmatch(to) or to == user.email.lower():
+        raise HTTPException(409, "This sender has no address that can be emailed.")
+    return creds, to
+
+
+@router.post("/unsubscribe/{domain}/email/draft")
+def draft_unsubscribe_email(domain: Domain, db: Session = Depends(get_db)):
+    user = _require_user(db)
+    creds, to = _email_sender(db, user, domain)
+    if unsubscribe.is_no_reply(to):
+        raise HTTPException(409, "This sender's address doesn't accept email.")
+    service = next((s for s in _load_scored(db, user)[1] if s.domain == domain), None)
+    if service is None:
+        raise HTTPException(404, "Sender not found.")
+    note = None
+    try:
+        draft = ai.write_email(service, _ai_id_token(user))
+    except (ai.AIUnavailable, HTTPException) as e:
+        # Still usable without AI, and the UI says which one this is.
+        note = e.detail if isinstance(e, HTTPException) else str(e)
+        draft = {
+            "subject": "Please unsubscribe me from your mailing list",
+            "body": f"Hello {service.name} team,\n\nI no longer want to receive your emails. Please remove me from "
+                    "all of your mailing lists and confirm once it's done.\n\nThank you.",
+        }
+    return {
+        "to": to,
+        "subject": draft["subject"],
+        "body": f"{draft['body']}\n\nMy email address: {user.email}",
+        "ai": note is None,
+        "note": note,
+        "can_send": gmail.can_send(creds),
+    }
+
+
+class EmailIn(BaseModel):
+    to: str = Field(max_length=320)  # what the user saw; must still match
+    subject: str = Field(min_length=1, max_length=200, pattern=r"^[^\r\n]+$")
+    body: str = Field(min_length=1, max_length=5000)
+
+
+@router.post("/unsubscribe/{domain}/email/send")
+def send_unsubscribe_email(domain: Domain, body: EmailIn, db: Session = Depends(get_db)):
+    with _send_lock:
+        user = _require_user(db)
+        creds, to = _email_sender(db, user, domain)
+        if unsubscribe.is_no_reply(to):
+            raise HTTPException(409, "This sender's address doesn't accept email.")
+        if body.to != to:  # the recipient is never taken from the client
+            raise HTTPException(409, "The address to write to has changed. Open this again and check it.")
+        if not gmail.can_send(creds):
+            raise HTTPException(403, "Allow Simplispace to send email first.")
+        since = datetime.utcnow() - timedelta(days=1)
+        if db.query(Decision).filter(
+            Decision.user_id == user.id, Decision.unsubscribed_via == "ai_email", Decision.unsubscribed_at > since
+        ).count() >= _EMAILS_PER_DAY:
+            raise HTTPException(429, "You've sent 20 unsubscribe emails today. Try again tomorrow.")
+        try:
+            gmail.send_email(creds, to, body.subject, body.body)
+        except HttpError as e:
+            if e.resp.status in (401, 403):
+                raise HTTPException(403, "Gmail didn't allow sending. Allow it again, then try once more.") from e
+            raise HTTPException(502, "Gmail couldn't send the email. Nothing was recorded.") from e
+        except (TransportError, ServerNotFoundError) as e:
+            raise HTTPException(502, "No internet connection. The email wasn't sent.") from e
+        except GoogleAuthError as e:
+            raise HTTPException(409, "Reconnect Gmail first.") from e
+        except OSError as e:
+            raise HTTPException(502, "Lost the connection while sending. Check Sent in Gmail before trying again.") from e
+
+        row = _get_decision(db, user, domain)
+        if not row:
+            row = Decision(user_id=user.id, domain=domain)
+            db.add(row)
+        row.decision, row.unsubscribed_via, row.page_result = "unsubscribe", "ai_email", None
+        row.unsubscribed_at = row.updated_at = datetime.utcnow()
+        attempt = _attempt(db, user.id, domain, "email")
+        attempt.failed, attempt.to_address, attempt.subject = False, to, body.subject
+        db.commit()
+        return _decision_json(row, db, user)
+
+
+def _check_replies(db: Session, user_id: int) -> None:
+    """After a sync: did a recent unsubscribe email bounce, or get an automatic reply?
+    Looks only at message headers. Best effort; the mailbox check still decides later."""
+    try:
+        user = db.get(User, user_id)
+        now = datetime.utcnow()
+        waiting = db.query(Decision).filter(
+            Decision.user_id == user_id, Decision.unsubscribed_via == "ai_email",
+            Decision.page_result.is_(None), Decision.unsubscribed_at > now - timedelta(days=3),
+        ).all()
+        if not waiting:
+            return
+        service = sync._service_for(user)
+        for d in waiting:
+            sent = db.query(UnsubAttempt).filter_by(user_id=user_id, domain=d.domain, method="email").first()
+            to, subject = (sent.to_address, sent.subject) if sent else (None, None)
+            roots = {scoring.root_domain(d.domain)} | ({scoring.root_domain(to.split("@")[1])} if to else set())
+            for m in db.query(Message).filter(
+                Message.user_id == user_id, Message.date >= d.unsubscribed_at - timedelta(minutes=1),
+                Message.date <= d.unsubscribed_at + timedelta(days=2),
+            ).order_by(Message.date):
+                sender = (m.sender_email or "").lower()
+                daemon = sender.split("@")[0] in ("mailer-daemon", "postmaster")
+                if not daemon and scoring.root_domain(m.sender_domain or "") not in roots:
+                    continue
+                full = service.users().messages().get(
+                    userId="me", id=m.gmail_id, format="metadata", metadataHeaders=unsubscribe.REPLY_HEADERS).execute()
+                after = (m.date - d.unsubscribed_at).total_seconds()
+                kind = unsubscribe.reply_kind(sync._headers(full), sender, m.subject or "", after, to, subject)
+                if kind:
+                    d.page_result = kind
+                    db.commit()
+                    if kind == "rejected":
+                        break  # certain; an automatic reply could still be followed by a bounce
+    except Exception:
+        db.rollback()
 
 
 class AnswerIn(BaseModel):

@@ -18,9 +18,10 @@ Set-Location "$ROOT"
 
 # 3. Build .exe with PyInstaller
 Write-Host "[2/3] Building exe (PyInstaller)..."
-# Ship only the app's Google OAuth client, never the developer's FERNET_KEY or data.
+# Ship only the app's Google OAuth client and the AI server's address, never the
+# developer's FERNET_KEY, AI_API_KEY or data.
 New-Item -ItemType Directory -Force "$ROOT\build" | Out-Null
-Select-String -Path "$ROOT\backend\.env" -Pattern '^(GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET)=' |
+Select-String -Path "$ROOT\backend\.env" -Pattern '^(GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET|AI_SERVER_URL)=' |
     ForEach-Object { $_.Line } | Set-Content -Encoding ascii "$ROOT\build\oauth.env"
 & $PY -m PyInstaller --noconfirm --clean Simplispace.spec
 

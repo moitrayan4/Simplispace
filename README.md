@@ -18,6 +18,7 @@ homepage, privacy policy and terms, served by GitHub Pages for Google's OAuth re
 | `frontend/` | React + Vite UI shown inside the app window |
 | `Simplispace.spec`, `icon.ico`, `build_exe.ps1` | PyInstaller build of `dist/Simplispace.exe` |
 | `setup.ps1`, `requirements.txt` | One-time developer setup |
+| `server/` | AI server (Cloudflare Worker), deployed separately |
 | `docs/` | Project website (GitHub Pages), not part of the app |
 
 ## Setup (once, after cloning)
@@ -38,8 +39,8 @@ Then add Google OAuth credentials to `backend\.env`:
    the OAuth consent screen, and create an **OAuth 2.0 Client ID** of type *Desktop app*.
 2. Add your Gmail address as a test user on the OAuth consent screen.
 3. Put the id and secret in `backend\.env` (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`).
-   Sign-in opens the system browser and returns to Simplispace through a temporary
-   loopback callback; no redirect URI needs to be registered.
+   Sign-in happens inside the Simplispace window and returns to the app's own API on
+   `localhost:8000`; no redirect URI needs to be registered.
 
 Ask the project owner for the shared client if you'd rather not create your own.
 Never commit `backend\.env`; it is gitignored.
@@ -52,7 +53,7 @@ mail\Scripts\python.exe desktop\main.py
 ```
 
 The app serves the built frontend from its own API on `localhost:8000` and shows it
-in a native window. Google sign-in opens in the system browser and returns to the app.
+in a native window. Google sign-in runs inside the window and returns to the app.
 In dev mode the database (`simplispace.db`) and icon cache live in `backend\`.
 
 ### Run locally on macOS
@@ -74,8 +75,8 @@ cp backend/.env.example backend/.env
 ```
 
 Edit `backend/.env` and set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from a
-Google OAuth *Desktop app* client. For local development, the system browser opens
-for sign-in and returns to a temporary loopback callback. Generate and set
+Google OAuth *Desktop app* client. For local development, sign-in runs in the
+same browser tab and returns to the app. Generate and set
 `FERNET_KEY` with:
 
 ```bash
@@ -144,24 +145,20 @@ per sender, and keyboard shortcuts (arrows, `K` keep, `U` unsubscribe, `X` selec
 
 **Unsubscribe:** nothing happens until you confirm a method: a one-click request
 (RFC 8058, sent to the sender's own HTTPS endpoint), the sender's unsubscribe page,
-or an unsubscribe email draft. The Gmail scope stays read-only; nothing is sent from
-Gmail. Any unsubscribe can be undone from its card or from History.
+or an unsubscribe email draft. Signing in asks only for read access. For senders with no unsubscribe option, AI drafts an
+email that the user checks and sends from their own Gmail; `gmail.send` is requested only then. Any unsubscribe can be undone from its card or from History.
 
 **Health score:** the share of the last 90 days of mail from Important/Useful
 senders (Optional counts half), excluding senders you unsubscribed from. Savings
 estimates use each sender's monthly volume and 10 seconds per email.
 
-**AI second opinions (optional):** configure an OpenAI-compatible Chat Completions
-endpoint and model in `backend/.env` (plus an API key for hosted providers). For Groq,
-set `AI_BASE_URL=https://api.groq.com/openai/v1` and
-`AI_MODEL=openai/gpt-oss-20b`. AI is off by default and must also be
-enabled in Settings. The user can request a second opinion only for ambiguous senders.
-That request sends the sender domain, aggregate scoring evidence and up to three
-recent subject lines to the configured provider; subject lines may contain personal
-information. Message bodies and Gmail credentials are never sent. Responses are
-validated and confidence-gated; low-confidence or failed calls leave the rule result
-in place. Review the provider's data-use terms before enabling this feature.
-The confidence value is reported by the model and is not a calibrated probability.
+**AI second opinions (optional, off by default):** the app can ask the Simplispace AI server (`server/`, a
+Cloudflare Worker that holds the Groq key) about ambiguous senders. Set its address as `AI_SERVER_URL` in
+`backend/.env`; `build_exe.ps1` ships that address, and never an AI key. Users are identified by a Google ID
+token and limited per account and overall. It gets the sender's name, domain and counts,
+never subject lines, and looks the company up on its website and Wikipedia. Developers can set their own `AI_API_KEY` instead, which takes priority, calls any OpenAI-compatible
+endpoint directly and also sends up to three recent subject lines. Results are cached per sender, and the
+rule-based category always stays visible. See `server/README.md` to deploy.
 
 **Logout vs delete:** Logout removes Gmail access but keeps senders and analysis for
 the next sign-in. Delete account in Settings erases everything.
@@ -172,6 +169,9 @@ the next sign-in. Delete account in Settings erases everything.
 cd backend
 ..\mail\Scripts\python.exe test_scoring.py
 ..\mail\Scripts\python.exe test_sync.py
+..\mail\Scripts\python.exe test_ai.py
+..\mail\Scripts\python.exe test_unsubscribe.py
+..\mail\Scripts\python.exe test_email.py
 ```
 
 ## API
@@ -179,7 +179,8 @@ cd backend
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | /health | liveness |
-| POST | /auth/login | open system-browser Google OAuth sign-in |
+| GET | /auth/login | start Google OAuth in the app window |
+| GET | /auth/callback | OAuth redirect target |
 | GET | /auth/status | connected account and last sync |
 | POST | /auth/logout | revoke Gmail access, keep local data |
 | POST | /auth/delete-account | revoke access and erase all local data |

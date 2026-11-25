@@ -25,13 +25,17 @@ class Settings(BaseSettings):
     # How many months of metadata to sync (proposal: 6-12+).
     sync_months: int = 0  # 0 = whole mailbox; N = only the last N months
 
-    # gmail.readonly is the only scope we ever request (proposal: minimal read-only).
+    # All that signing in asks for (proposal: minimal read-only). Sending is asked for
+    # separately, only when someone first sends an unsubscribe email (gmail.SEND_SCOPE).
     scopes: list[str] = ["https://www.googleapis.com/auth/gmail.readonly"]
 
     # AI classification is local-first and opt-in per account. The provider uses
     # the OpenAI Chat Completions API shape, so compatible hosted/local endpoints
     # can be configured without changing application code.
     ai_api_key: str = ""
+    # The Simplispace AI server (server/). Used when there is no AI_API_KEY, so users
+    # need no key: they are identified by their Google sign-in instead.
+    ai_server_url: str = ""
     # Groq defaults let a user add only AI_API_KEY to enable the documented setup.
     ai_model: str = "openai/gpt-oss-20b"
     ai_base_url: str = "https://api.groq.com/openai/v1"

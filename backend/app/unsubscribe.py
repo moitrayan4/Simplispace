@@ -127,11 +127,63 @@ def verification(
         return "page_confirmed"
     if page_result == "failed":
         return "page_failed"
+    if page_result == "rejected":
+        return "rejected"
     if page_result == "unclear":
         return "needs_answer"
     if last_synced_at and last_synced_at >= unsubscribed_at + CONFIRM_AFTER:
         return "confirmed"
-    return "checking"
+    return "auto_reply" if page_result == "auto_reply" else "checking"
+
+
+# Outcomes that mean "offer the next way".
+FAILED_STATUSES = {"still_sending", "page_failed", "rejected", "auto_reply"}
+# For senders with no unsubscribe option, in the order they are offered.
+STEPS = ("email", "block")
+STEP_OF = {"ai_email": "email", "block": "block"}
+
+_NO_REPLY = re.compile(r"^(no|do-?_?\.?not)[-_.]?reply|^(bounces?|mailer-daemon)\b", re.I)
+
+
+def is_no_reply(address: str) -> bool:
+    return bool(_NO_REPLY.match(address or ""))
+
+
+# Headers that say how a reply was made. The reply's text is never read.
+REPLY_HEADERS = ["Auto-Submitted", "X-Autoreply", "X-Autorespond", "Precedence", "X-Failed-Recipients"]
+
+
+def reply_kind(
+    headers: dict, sender: str, subject: str, seconds_after: float, to: str | None, sent_subject: str | None
+) -> str | None:
+    """'rejected' (it bounced), 'auto_reply', or None for anything else (a person, a newsletter)."""
+    bounced = [a.strip().lower() for a in headers.get("x-failed-recipients", "").split(",")]
+    if to and to.lower() in bounced:
+        return "rejected"
+    if sender.split("@")[0] in ("mailer-daemon", "postmaster"):
+        return None  # a delay notice, or about some other email
+    base = lambda s: re.sub(r"^((re|aw|auto(matic)?([- ]?reply)?)\s*:\s*)+", "", (s or "").strip().lower())  # noqa: E731
+    about_ours = bool(sent_subject) and base(sent_subject) in base(subject)
+    labelled = (
+        headers.get("auto-submitted", "").lower().startswith("auto-replied")
+        or "x-autoreply" in headers or "x-autorespond" in headers
+        or headers.get("precedence", "").lower() == "auto_reply"
+    )
+    if labelled:
+        return "auto_reply"
+    # Unlabelled, like Etsy's: the same subject straight back from a no-reply address.
+    quick = seconds_after <= 600 and is_no_reply(sender)
+    return "auto_reply" if quick and (about_ours or not sent_subject) else None
+
+
+# A link in an email can lead anywhere; only pages about email settings count.
+_EMAIL_URL = re.compile(r"unsub|subscription|opt[-_]?out|preference|email[-_]?settings|notification", re.I)
+# Not just "subscribe": shops put a newsletter sign-up on every page.
+_EMAIL_TEXT = re.compile(r"unsubscribed|unsubscribe from|no longer receive|opted out|(email|communication|subscription) preferences|email (topics|settings)", re.I)
+
+
+def is_unsubscribe_page(url: str, text: str) -> bool:
+    return bool(_EMAIL_URL.search(url) or _EMAIL_TEXT.search(text or ""))
 
 
 # --- Reading the sender's page (desktop app only) ----------------------------
@@ -141,15 +193,26 @@ def verification(
 # close the window. on_closed() runs when the window closes.
 in_app_opener = None
 
+# No backslashes or line breaks in these scripts: the window library passes them through
+# eval("...") without escaping those, so a "\n" becomes a syntax error on every page.
 PAGE_TEXT = "document.body ? document.body.innerText : ''"
 # Gmail announces actions in small notices marked role="alert" ("Unsubscribed from…",
 # "You blocked…", "Message sent"). Reading only those, never the open email, avoids
-# false matches on words inside someone's message.
+# false matches on words inside someone's message. If Gmail hands over to the sender's
+# own website, that page is read whole instead.
 GMAIL_NOTICES = (
-    "Array.prototype.map.call(document.querySelectorAll('[role=alert]'),"
-    " function (e) { return e.innerText; }).join('\\n')"
+    "/(^|[.])google[.]com$/.test(location.hostname)"
+    " ? Array.prototype.map.call(document.querySelectorAll('[role=alert]'),"
+    " function (e) { return e.innerText; }).join(' | ')"
+    " : " + PAGE_TEXT
 )
-_GMAIL_DONE = ("unsubscribed", "blocked", "reported as spam", "marked as spam", "message sent")
+
+
+def on_google(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host == "google.com" or host.endswith(".google.com")
+
+_GMAIL_DONE = ("unsubscribed", "unsubscribe request sent", "blocked", "reported as spam", "marked as spam", "message sent")
 
 
 def gmail_done(notices: str) -> bool:
@@ -177,16 +240,20 @@ _FAILED = (
 )
 _SUCCEEDED = (
     "unsubscribed", "unsubscribe successful", '"success":true', '"success": true',
-    "you have been removed", "you’ve been removed", "you've been removed", "removed from",
+    "you have been removed", "you’ve been removed", "you've been removed",
     "no longer receive", "won't receive", "will not receive", "won’t receive",
     "opted out", "preferences have been updated", "preferences updated",
 )
 
 
+# "Removed from our mailing list", but not "removed from your basket".
+_REMOVED = re.compile(r"removed from .{0,40}(list|newsletter|subscription|emails)")
+
+
 def classify_page(text: str) -> str | None:
     """'success' | 'failed' | None (can't tell yet: a form to click, a challenge page...)."""
     text = (text or "").lower()
-    succeeded = any(p in text for p in _SUCCEEDED)
+    succeeded = any(p in text for p in _SUCCEEDED) or bool(_REMOVED.search(text))
     failed = any(p in text for p in _FAILED)
     # "Failed to unsubscribe" mentions both; anything mixed stays undecided.
     if succeeded and not failed:

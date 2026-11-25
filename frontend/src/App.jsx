@@ -98,12 +98,14 @@ const ORDER_GROUPS = {
   },
 };
 
-// `services` arrives sorted by score, lowest first.
-function orderServices(services, order) {
+// `services` arrives sorted by score, lowest first. `pinned` keeps a card where it is after the AI
+// changes its category, so the answer isn't whisked away from the person who asked for it.
+function orderServices(services, order, pinned = {}) {
+  const category = (s) => pinned[s.domain] ?? s.category;
   if (order === "spam") return services;
   if (order === "important") return [...services].reverse();
-  if (order.startsWith("only:")) return services.filter((s) => s.category === order.slice(5));
-  const groups = MIX_ORDER.map((category) => services.filter((s) => s.category === category));
+  if (order.startsWith("only:")) return services.filter((s) => category(s) === order.slice(5));
+  const groups = MIX_ORDER.map((name) => services.filter((s) => category(s) === name));
   const mixed = [];
   for (let i = 0; mixed.length < services.length; i++) {
     for (const group of groups) if (i < group.length) mixed.push(group[i]);
@@ -154,7 +156,18 @@ function GoogleIcon() {
   );
 }
 
-function LoginScreen({ onLogin, pending, error }) {
+// Set when Google sends the user back without a working sign-in. Read once, then removed
+// from the address so a reload doesn't show it again.
+const LOGIN_ERROR = (() => {
+  const kind = new URLSearchParams(location.search).get("login_error") || "";
+  if (!/^\w{1,60}$/.test(kind)) return "";
+  history.replaceState(null, "", location.pathname);
+  return kind === "gmail"
+    ? "Simplispace needs the Gmail permission. Sign in again and tick the box that lets it view your email messages."
+    : `Google sign-in didn’t finish (${kind}). Please try again.`;
+})();
+
+function LoginScreen() {
   const online = useOnline();
   return (
     <div className="login">
@@ -169,10 +182,10 @@ function LoginScreen({ onLogin, pending, error }) {
         </p>
 
         {online ? (
-          <button className="btn google" onClick={onLogin} disabled={pending}>
+          <a className="btn google" href={api.loginUrl()}>
             <GoogleIcon />
-            <span>{pending ? "Waiting for Google sign-in…" : "Continue with Google"}</span>
-          </button>
+            <span>Continue with Google</span>
+          </a>
         ) : (
           <button className="btn google" disabled>
             <GoogleIcon />
@@ -180,10 +193,8 @@ function LoginScreen({ onLogin, pending, error }) {
           </button>
         )}
 
-        {error ? (
-          <p className="error offline-inline" role="alert">{error}</p>
-        ) : pending ? (
-          <p className="login-fine">Complete sign-in in your system browser, then return here.</p>
+        {online && LOGIN_ERROR ? (
+          <p className="error offline-inline" role="alert">{LOGIN_ERROR}</p>
         ) : online ? (
           <p className="login-fine">Sign in with Google to get started.</p>
         ) : (
@@ -219,9 +230,9 @@ function PrivacyNotice({ email, onAccept }) {
         </p>
 
         <ul className="notice-points">
-          <li><Check /><span>Simplispace only reads your Gmail; it never sends or deletes Gmail messages.</span></li>
+          <li><Check /><span>Simplispace reads your Gmail and never deletes or changes it. It can send an unsubscribe email only if you allow it, and only when you press Send.</span></li>
           <li><Check /><span>Nothing gets unsubscribed until you say so.</span></li>
-          <li><Check /><span>AI second opinions are off by default. If you enable them in Settings, a sender domain and up to three recent subject lines for an ambiguous sender are sent to the configured AI provider.</span></li>
+          <li><Check /><span>AI second opinions are off by default. If you turn them on and ask for one, that sender’s domain and scoring numbers are sent for analysis. AI also writes an unsubscribe email if you ask it to. Settings shows exactly what is sent, and to whom.</span></li>
           <li><Check /><span>Email bodies are never downloaded or sent to an AI provider.</span></li>
         </ul>
 
@@ -255,6 +266,7 @@ const VIA_LABELS = {
   in_app: "Unsubscribe page opened in Simplispace.",
   gmail: "Unsubscribed with Gmail’s Unsubscribe button.",
   block: "Opened in Gmail to block the sender.",
+  ai_email: "An unsubscribe email was sent from your Gmail.",
 };
 
 const CONFIRMED = ["confirmed", "page_confirmed"];
@@ -266,6 +278,8 @@ const STATUS_SHORT = {
   confirmed: "✓ Confirmed",
   page_confirmed: "✓ Confirmed",
   page_failed: "Didn’t work",
+  rejected: "Didn’t work",
+  auto_reply: "Automatic reply",
   still_sending: "Still emailing",
 };
 
@@ -284,7 +298,8 @@ const ASK_BY_VIA = {
 
 function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
   if (decision.status === "page_confirmed") {
-    return <p className="decision-note done">✓ Unsubscribed. The sender’s page confirmed it.</p>;
+    return <p className="decision-note done">✓ {decision.unsubscribed_via === "block" ? "Blocked" : "Unsubscribed"}.{" "}
+      {decision.unsubscribed_via === "in_app" ? "The sender’s page" : "Gmail"} confirmed it.</p>;
   }
   if (decision.status === "in_progress") {
     return (
@@ -313,6 +328,21 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
         <span>The sender’s page reported an error, so this didn’t work.</span>
         <span className="note-actions">
           <button className="link inline" onClick={onRetry}>Try another way</button>
+        </span>
+      </div>
+    );
+  }
+  if (decision.status === "rejected" || decision.status === "auto_reply") {
+    return (
+      <div className="decision-note failed">
+        <span>
+          {decision.status === "rejected"
+            ? "Didn’t work: this address doesn’t accept email."
+            : "They sent an automatic reply, so nobody may have read your email. Check the reply in Gmail, or try another way."}
+        </span>
+        <span className="note-actions">
+          <button className="link inline" onClick={onRetry}>Try another way</button>
+          {decision.status === "auto_reply" && <button className="link inline" onClick={onReset}>Undo</button>}
         </span>
       </div>
     );
@@ -352,14 +382,14 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
 
 function StillSending({ services, decisions, onRetry }) {
   const failing = services.filter((s) =>
-    ["still_sending", "page_failed"].includes(decisions[s.domain]?.status),
+    ["still_sending", "page_failed", "rejected", "auto_reply"].includes(decisions[s.domain]?.status),
   );
   if (failing.length === 0) return null;
   return (
     <section className="panel attention">
       <div className="panel-head">
-        <strong>Unsubscribes that didn’t work</strong>
-        <span className="muted small">These senders kept emailing you after you unsubscribed.</span>
+        <strong>Unsubscribes that need another try</strong>
+        <span className="muted small">These senders may still email you.</span>
       </div>
       <ul className="rows">
         {failing.map((s) => (
@@ -369,6 +399,10 @@ function StillSending({ services, decisions, onRetry }) {
               <span className="muted small">
                 {decisions[s.domain].status === "page_failed"
                   ? "The sender’s page reported an error"
+                  : decisions[s.domain].status === "rejected"
+                  ? "Their address doesn’t accept email"
+                  : decisions[s.domain].status === "auto_reply"
+                  ? "They sent an automatic reply"
                   : `${decisions[s.domain].emails_since} new email${decisions[s.domain].emails_since === 1 ? "" : "s"} since ${shortDate(decisions[s.domain].unsubscribed_at)}`}
               </span>
             </div>
@@ -388,11 +422,120 @@ function hostOf(url) {
   }
 }
 
-function UnsubscribeDialog({ service, onClose, onDone }) {
+// An edited draft is kept (in this window only) while Google asks for permission to send.
+const PENDING_EMAIL = "pendingUnsubscribeEmail";
+
+function takePendingEmail(account) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(PENDING_EMAIL));
+    sessionStorage.removeItem(PENDING_EMAIL);
+    return saved && saved.account === account ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+// For senders with no unsubscribe option: the AI writes an email, the user checks it and
+// presses Send, and it goes out from their own Gmail.
+function EmailUnsubscribe({ service, account, saved, onDone, onBusy }) {
+  const online = useOnline();
+  const [draft, setDraft] = useState(saved ? { ...saved.draft } : null);
+  const [working, setWorking] = useState("");
+  const [error, setError] = useState("");
+  const edit = (field) => (e) => setDraft({ ...draft, [field]: e.target.value });
+
+  async function run(label, task) {
+    setWorking(label);
+    setError("");
+    onBusy(true);
+    try {
+      await task();
+    } catch (e) {
+      setError(String(e.message || e));
+    }
+    setWorking("");
+    onBusy(false);
+  }
+
+  const write = () => run("write", async () => setDraft(await api.draftEmail(service.domain)));
+  const send = () =>
+    run("send", async () => {
+      const { to, subject, body } = draft;
+      onDone(service.domain, await api.sendEmail(service.domain, { to, subject, body }));
+    });
+  function allow() {
+    sessionStorage.setItem(PENDING_EMAIL, JSON.stringify({ account, domain: service.domain, draft }));
+    window.location.href = api.loginUrl(true);
+  }
+
+  if (!draft)
+    return (
+      <>
+        <button className="unsub-choice" disabled={Boolean(working) || !online} onClick={write}>
+          <strong>{working ? "Writing your email…" : "Unsubscribe by email, written by AI"}</strong>
+          <span className="muted small">
+            AI writes a personal email asking {service.name} to stop. You check it, then it’s sent from your Gmail.
+            Only {service.name}’s name, domain, email count and last email date go to the AI.
+          </span>
+        </button>
+        {error && <p className="error" role="alert">{error}</p>}
+      </>
+    );
+
+  return (
+    <div className="email-draft">
+      {!draft.ai && (
+        <p className="no-unsub">AI couldn’t write this one ({draft.note}) so here is a standard email you can edit.</p>
+      )}
+      <p className="muted small">To: {draft.to}</p>
+      <label className="muted small" htmlFor="email-subject">Subject</label>
+      <input id="email-subject" value={draft.subject} maxLength={200} onChange={edit("subject")} />
+      <label className="muted small" htmlFor="email-body">Email</label>
+      <textarea id="email-body" rows={9} value={draft.body} maxLength={5000} onChange={edit("body")} />
+      <p className="muted small">
+        {draft.can_send
+          ? "Sent from your Gmail only when you press Send. "
+          : "Google will ask you to let Simplispace send email. It is only used when you press Send here. "}
+        Writing to a sender you don’t recognise tells them your address is in use.
+      </p>
+      {error && <p className="error" role="alert">{error}</p>}
+      <div className="email-send">
+        <button className="link" onClick={write} disabled={Boolean(working) || !online}>
+          {working === "write" ? "Writing…" : "Write it again"}
+        </button>
+        {draft.can_send ? (
+          <button
+            className="btn danger-solid"
+            onClick={send}
+            disabled={Boolean(working) || !online || !draft.subject.trim() || !draft.body.trim()}
+          >
+            {working === "send" ? "Sending…" : "Send from my Gmail"}
+          </button>
+        ) : (
+          <button className="btn primary" onClick={allow} disabled={Boolean(working) || !online}>
+            Allow sending
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Senders with no unsubscribe option: one way at a time, the next once this one fails.
+const STEP_TEXT = {
+  block: {
+    title: "Block in Gmail",
+    detail: (name) =>
+      `Opens ${name}’s latest email inside Simplispace. Click ⋮ (More) at the top right of the email, then Block. All their emails, including any order updates, then go to Spam.`,
+  },
+};
+
+function UnsubscribeDialog({ service, account, saved, onClose, onDone }) {
   const online = useOnline();
   const [options, setOptions] = useState(null);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const [otherStep, setOtherStep] = useState(saved ? "email" : null);
 
   useEffect(() => {
     api.unsubscribeOptions(service.domain)
@@ -417,7 +560,12 @@ function UnsubscribeDialog({ service, onClose, onDone }) {
     }
   }
 
-  const choices = options
+  const steps = options?.steps;
+  const noOption = Boolean(saved || steps);
+  const step = otherStep || options?.step;
+  const choices = STEP_TEXT[step]
+    ? [{ method: step, title: STEP_TEXT[step].title, detail: STEP_TEXT[step].detail(service.name) }]
+    : options && !noOption
     ? [
         {
           method: "one_click",
@@ -449,16 +597,16 @@ function UnsubscribeDialog({ service, onClose, onDone }) {
       >
         <h2 id="unsub-title">Unsubscribe from {service.name}?</h2>
         <p className="muted modal-sub">
-          {service.sender_email || service.domain} · {service.email_count.toLocaleString()} emails.
-          Pick how to unsubscribe. Nothing happens until you choose one.
+          {service.sender_email || service.domain} · {service.email_count.toLocaleString()} emails.{" "}
+          {noOption
+            ? "They offer no one-click or Gmail unsubscribe."
+            : "Pick how to unsubscribe. Nothing happens until you choose one."}
         </p>
-        {!options && !error && <p className="muted">Checking this sender’s unsubscribe options…</p>}
-        {options && !options.link && !options.mailto && (
-          <p className="no-unsub">
-            {service.name}’s emails don’t include a one-click unsubscribe link or a Gmail Unsubscribe option.
-          </p>
-        )}
+        {!options && !error && !saved && <p className="muted">Checking this sender’s unsubscribe options…</p>}
         <div className="unsub-choices">
+          {step === "email" && (
+            <EmailUnsubscribe service={service} account={account} saved={saved} onDone={onDone} onBusy={setWorking} />
+          )}
           {choices.map((choice) => (
             <button
               key={choice.method}
@@ -471,6 +619,18 @@ function UnsubscribeDialog({ service, onClose, onDone }) {
             </button>
           ))}
         </div>
+        {steps?.length > 1 && (
+          <p className="muted small">
+            Not possible for this sender?{" "}
+            <button
+              className="link inline"
+              disabled={working}
+              onClick={() => { setError(""); setOtherStep(steps[(steps.indexOf(step) + 1) % steps.length]); }}
+            >
+              Try another way
+            </button>
+          </p>
+        )}
         {!online && (
           <p className="error" role="alert">
             You’re offline. Unsubscribing needs the internet; these options come back when you reconnect.
@@ -1047,6 +1207,22 @@ function RecentEmails({ domain }) {
   );
 }
 
+function AiOpinion({ opinion }) {
+  const changed = opinion.status === "applied" && opinion.category !== opinion.rule_category;
+  return (
+    <div className="ai-opinion" role="status">
+      <p className="ai-tag">
+        AI second opinion: {changed ? `${opinion.rule_category} → ${opinion.category}` : opinion.category} ·{" "}
+        {Math.round(opinion.confidence * 100)}% sure
+      </p>
+      {opinion.about && <p><strong>Who they are</strong> {opinion.about}</p>}
+      {opinion.reason && <p><strong>Why</strong> {opinion.reason}</p>}
+      {opinion.advice && <p><strong>Suggestion</strong> {opinion.advice}</p>}
+      {opinion.sources?.length > 0 && <p className="muted">Looked up: {opinion.sources.join(", ")}</p>}
+    </div>
+  );
+}
+
 function ServiceCardInner({
   service, decision, onUnsubscribe, onKeep, onReset, onRetry, onAnswer, showLogos, selected, onSelect,
   onClassifyAI, onDismissAI, classifying,
@@ -1151,23 +1327,15 @@ function ServiceCardInner({
 
       <div className="service-category-row">
         <span className={`badge ${categoryClass}`}>{service.category}</span>
-        {service.ai_classification?.status === "applied" && (
-          <span className="ai-tag" title={service.ai_classification.explanation}>
-            AI second opinion · model-reported confidence {Math.round(service.ai_classification.confidence * 100)}%
-          </span>
-        )}
       </div>
       {service.ai_classification?.status === "low_confidence" && (
-        <p className="ai-result muted small">
-          AI suggested {service.ai_classification.category} (model-reported confidence {Math.round(service.ai_classification.confidence * 100)}%),
-          below the acceptance threshold. {service.category} remains the category.
-        </p>
+        <p className="ai-result muted small">The AI wasn’t sure enough, so this stays {service.category}.</p>
       )}
       {service.ai_classification?.status === "failed" && (
         <p className="ai-result muted small">The AI review failed. The rule-based category remains; you can retry.</p>
       )}
-      {service.ai_classification?.status === "applied" && (
-        <p className="ai-result muted small">{service.ai_classification.explanation}</p>
+      {["applied", "low_confidence"].includes(service.ai_classification?.status) && (
+        <AiOpinion opinion={service.ai_classification} />
       )}
       {service.ai_classification && (
         <button className="link small" type="button" onClick={() => onDismissAI(service.domain)}>
@@ -1181,7 +1349,7 @@ function ServiceCardInner({
           disabled={classifying}
           onClick={() => onClassifyAI(service.domain)}
         >
-          {classifying ? "Asking the configured AI…" : "Get an AI second opinion"}
+          {classifying ? "Looking them up and thinking…" : "Get an AI second opinion"}
         </button>
       )}
 
@@ -1605,7 +1773,7 @@ function ProfileView({ status, services, busy, onSync, onLogout, loggingOut }) {
           <strong className="profile-email">{status.email}</strong>
           <span className="account-sync">
             <span className={`status-dot ${busy ? "busy" : ""}`} aria-hidden="true" />
-            {status.needs_reconnect ? "Reconnect needed to keep syncing" : "Gmail connected · read-only access"}
+            {status.needs_reconnect ? "Reconnect needed to keep syncing" : status.can_send ? "Gmail connected · read, and send unsubscribe emails" : "Gmail connected · read-only access"}
           </span>
         </div>
       </section>
@@ -1638,9 +1806,9 @@ function PrivacyView() {
     <>
       <section className="panel">
         <ul className="notice-points">
-          <li><Check /><span>Read-only Gmail access. Simplispace never sends, deletes, or changes your mail.</span></li>
+          <li><Check /><span>Read-only Gmail access by default. Simplispace never deletes or changes your mail. If you allow it to send, it sends only the unsubscribe emails you check and press Send on.</span></li>
           <li><Check /><span>Only email details are read: sender, subject, date, labels, and unsubscribe headers. Email bodies are never downloaded.</span></li>
-          <li><Check /><span>Your data stays on this computer by default. If you enable AI in Settings, only the sender domain and up to three recent subject lines for ambiguous senders are sent to the configured AI provider. Your Gmail sign-in is stored encrypted.</span></li>
+          <li><Check /><span>Your data stays on this computer by default. If you turn on AI and ask for a second opinion, that sender’s domain and scoring numbers are sent through Simplispace’s AI server to the AI provider Groq. If you set up your own AI key instead, they go straight to your provider with up to three recent subject lines. Your Gmail sign-in is stored encrypted.</span></li>
           <li><Check /><span>Sender logos are looked up by website address only, once per sender, via Google’s icon service or the sender’s own site. You can turn this off in Settings.</span></li>
           <li><Check /><span>Nothing is unsubscribed until you confirm how you want to do it.</span></li>
         </ul>
@@ -1791,11 +1959,13 @@ function SettingsView({ display, email, status, onSetAiEnabled, onDeleteAccount 
           <p className="muted small">Configured provider: {status.ai_provider} · model: {status.ai_model}</p>
         )}
         <p className="muted small">
-          When enabled, you can request a second opinion for ambiguous senders. That request sends the sender domain,
-          up to three recent subject lines, and aggregate scoring signals to the configured provider. Subject lines may
-          contain personal information. Email bodies and Gmail credentials are never sent. Turn this off any time.
-          Model-reported confidence is not a calibrated probability.
-          Turning it off also removes saved AI results.
+          When enabled, you can request a second opinion for ambiguous senders.{" "}
+          {status.ai_sends_subjects
+            ? "That request sends the sender domain, up to three recent subject lines, and numbers such as how many you open to the provider above. Subject lines may contain personal information."
+            : "That request sends the sender domain and numbers (such as how many emails they send and how many you open) to Simplispace’s AI server, with proof of your Google sign-in. The server looks up the company on its website and Wikipedia, and passes only the sender and numbers to the AI provider Groq. Subject lines are not sent."}{" "}
+          If you ask AI to write an unsubscribe email, that sender’s name, domain, email count and last email date are
+          sent the same way, even when this is off. Email contents and Gmail access are never sent. The AI’s confidence is its own estimate. Turn this off any
+          time; that also removes saved AI results.
         </p>
       </section>
       <section className="panel">
@@ -1845,8 +2015,6 @@ export default function App() {
   const online = useOnline();
   const [notice, setNotice] = useState("");
   const [status, setStatus] = useState(null);
-  const [loginPending, setLoginPending] = useState(false);
-  const [loginError, setLoginError] = useState("");
   const [services, setServices] = useState([]);
   const [loadingServices, setLoadingServices] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1854,9 +2022,12 @@ export default function App() {
   const syncTimerRef = useRef(null);
   const [progress, setProgress] = useState(null);
   const [progressVisible, setProgressVisible] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(LOGIN_ERROR);
   const [success, setSuccess] = useState("");
   const [classifyingDomain, setClassifyingDomain] = useState(null);
+  const [pinned, setPinned] = useState({}); // domain -> category it is listed under until the list is reopened
+  const pin = (domain) =>
+    setPinned((was) => ({ ...was, [domain]: was[domain] ?? services.find((s) => s.domain === domain)?.category }));
   useEffect(() => {
     if (!success) return;
     const t = setTimeout(() => setSuccess(""), 6000);
@@ -1866,6 +2037,7 @@ export default function App() {
   const [decisions, setDecisions] = useState({});
   const [insights, setInsights] = useState(null);
   const [reviewing, setReviewing] = useState(null);
+  const [savedEmail, setSavedEmail] = useState(null);
   const [view, setView] = useState("overview");
   const [order, setOrder] = useState("mixed");
   const [page, setPage] = useState(0);
@@ -1887,6 +2059,7 @@ export default function App() {
       return !q || [s.name, s.domain, s.sender_email].some((v) => v?.toLowerCase().includes(q));
     }),
     order,
+    pinned,
   );
   const toggleSelect = useCallback((domain) => {
     setSelected((prev) => {
@@ -1997,11 +2170,28 @@ export default function App() {
     }
   }
 
+  // Back from Google's "allow sending" page: reopen the draft. It is never sent by itself.
+  useEffect(() => {
+    if (!status?.connected || !services.length || !sessionStorage.getItem(PENDING_EMAIL)) return;
+    const saved = takePendingEmail(status.email);
+    const service = saved && services.find((s) => s.domain === saved.domain);
+    if (!service) return;
+    setSavedEmail({ ...saved, draft: { ...saved.draft, can_send: Boolean(status.can_send) } });
+    setReviewing(service);
+  }, [status, services]);
+
   // While an unsubscribe window is open, refresh until the app has read the result.
   const waitingOnPage = Object.values(decisions).some((d) => d.status === "in_progress");
   useEffect(() => {
     if (!waitingOnPage) return;
-    const timer = setInterval(() => api.decisions().then(setDecisions).catch(() => {}), 1500);
+    const refresh = (next) =>
+      setDecisions((current) => {
+        const undone = Object.keys(current).filter((d) => current[d].status === "in_progress" && !next[d]);
+        if (undone.length)
+          setNotice("The window closed before the unsubscribe was confirmed, so that sender is unchanged. Press Unsubscribe to try again.");
+        return next;
+      });
+    const timer = setInterval(() => api.decisions().then(refresh).catch(() => {}), 1500);
     return () => clearInterval(timer);
   }, [waitingOnPage]);
 
@@ -2019,6 +2209,8 @@ export default function App() {
     );
     setReviewing(null);
     applyDecision(domain, record);
+    // Bounces and automatic replies arrive within a minute or two: look for them soon.
+    if (record.unsubscribed_via === "ai_email") setTimeout(() => autoSyncRef.current?.(true), 120_000);
     if (CONFIRMED.includes(record.status)) setSuccess(`Unsubscribed from ${nameOf(domain)}.`);
     else if (record.status !== "in_progress" && !record.fallback_reason)
       setSuccess(`Unsubscribe request sent to ${nameOf(domain)}. Simplispace will check for new mail during sync.`);
@@ -2026,46 +2218,6 @@ export default function App() {
 
   // A failed check is not "signed out": keep what we know and try again shortly.
   const refreshStatus = () => api.status().then(setStatus).catch(() => setTimeout(refreshStatus, 1500));
-
-  async function beginGoogleLogin() {
-    if (loginPending) return;
-    setLoginError("");
-    try {
-      await api.login();
-      setLoginPending(true);
-    } catch (e) {
-      setLoginError(e.message || "Couldn’t start Google sign-in.");
-    }
-  }
-
-  useEffect(() => {
-    if (!loginPending) return;
-    let stopped = false;
-    const checkLogin = async () => {
-      try {
-        const next = await api.status();
-        if (stopped || next.login_in_progress) return;
-        if (next.login_error) {
-          setLoginError(next.login_error);
-          setLoginPending(false);
-        } else if (next.connected && !next.needs_reconnect) {
-          // Reinitialize sync/status effects after both first sign-in and reconnect.
-          window.location.reload();
-        } else {
-          setLoginError("Google sign-in did not complete. Please try again.");
-          setLoginPending(false);
-        }
-      } catch {
-        // Keep polling through a temporary local API hiccup.
-      }
-    };
-    const timer = setInterval(checkLogin, 1000);
-    checkLogin();
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  }, [loginPending]);
 
   useEffect(() => {
     refreshStatus();
@@ -2116,17 +2268,16 @@ export default function App() {
     }
   }
 
+  // Reopening the list, or sorting it differently, puts every card in its current category.
+  useEffect(() => setPinned({}), [order, view]);
+
   async function requestAiReview(domain) {
     setClassifyingDomain(domain);
+    pin(domain);
     setError("");
     try {
-      const result = await api.classifyService(domain);
+      await api.classifyService(domain);
       await loadServices();
-      setSuccess(
-        result.status === "applied"
-          ? `AI second opinion: ${result.category} (${Math.round(result.confidence * 100)}% confidence).`
-          : `AI confidence was low; ${result.rule_category} remains the category.`,
-      );
     } catch (e) {
       setError(e.message || "Couldn’t classify this sender.");
       await loadServices();
@@ -2137,9 +2288,9 @@ export default function App() {
 
   async function dismissAiReview(domain) {
     try {
+      pin(domain);
       await api.dismissAiClassification(domain);
       await loadServices();
-      setSuccess("AI recommendation dismissed. The rule-based category is restored.");
     } catch (e) {
       setError(e.message || "Couldn’t dismiss the AI recommendation.");
     }
@@ -2297,7 +2448,7 @@ export default function App() {
 
   if (!status) return <div className="app"><p>Loading…</p></div>;
 
-  if (!status.connected) return <LoginScreen onLogin={beginGoogleLogin} pending={loginPending} error={loginError} />;
+  if (!status.connected) return <LoginScreen />;
 
   if (!ack) return <PrivacyNotice email={status.email} onAccept={acceptPrivacy} />;
 
@@ -2364,13 +2515,10 @@ export default function App() {
               <span className="muted small">Your senders and choices are saved. Reconnect to keep syncing.</span>
             </div>
             {online ? (
-              <button className="btn primary sm" onClick={beginGoogleLogin} disabled={loginPending}>
-                {loginPending ? "Waiting for Google…" : "Reconnect Gmail"}
-              </button>
+              <a className="btn primary sm" href={api.loginUrl()}>Reconnect Gmail</a>
             ) : (
               <button className="btn primary sm" disabled title="Needs an internet connection">Reconnect Gmail</button>
             )}
-            {loginError && <span className="error small" role="alert">{loginError}</span>}
           </div>
         )}
 
@@ -2593,7 +2741,10 @@ export default function App() {
 
       {reviewing && (
         <UnsubscribeDialog
+          key={reviewing.domain}
           service={reviewing}
+          account={status.email}
+          saved={savedEmail?.domain === reviewing.domain ? savedEmail : null}
           onClose={() => setReviewing(null)}
           onDone={finishUnsubscribe}
         />

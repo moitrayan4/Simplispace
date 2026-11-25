@@ -1,9 +1,9 @@
 """Sender logos: the brand site's own icon, fetched once and cached on disk.
 
-Only the sender's domain is looked up (never anything from an email). Tries
-Google's favicon service (with and without www.), DuckDuckGo's icon service,
-then the site's own /favicon.ico. Misses are cached too, so a domain without an icon isn't retried
-on every page view.
+Only the sender's domain is looked up (never anything from an email). Tries the
+site's own /favicon.ico, Google's favicon service (with and without www.), then
+DuckDuckGo's icon service. Misses are cached too, so a domain without an icon isn't
+retried on every page view; being offline doesn't count as a miss.
 """
 import re
 import ssl
@@ -49,19 +49,25 @@ class _Offline(Exception):
 def _google(site: str):
     # `default=404` prevents Google's generic globe icon being mistaken for a
     # sender logo, allowing the next source (or letter fallback) to be used.
-    return _fetch(url=f"https://www.google.com/s2/favicons?domain={site}&sz=64&default=404")
+    return _fetch(f"https://www.google.com/s2/favicons?domain={site}&sz=64&default=404", strict=True)
 
 
-def _fetch(url: str) -> tuple[bytes, str] | None:
+def _fetch(url: str, strict: bool = False) -> tuple[bytes, str] | None:
     request = urllib.request.Request(url, headers={"User-Agent": "Simplispace"})
     try:
         tls = ssl.create_default_context(cafile=certifi.where())
         with urllib.request.urlopen(request, timeout=5, context=tls) as response:
             kind = response.headers.get_content_type()
             body = response.read(MAX_BYTES + 1)
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as e:
+        if strict and (e.code == 429 or e.code >= 500):
+            raise _Offline from e  # the service is having trouble; not an answer
         return None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        # A sender's own site may simply not exist, so only an icon service being
+        # unreachable (strict) means we're offline.
+        if strict:
+            raise _Offline from e
         return None
     # Raster images only: an SVG served from the app's own origin could carry script.
     if not kind.startswith("image/") or "svg" in kind or not body or len(body) > MAX_BYTES:
@@ -85,10 +91,15 @@ def get_icon(domain: str) -> tuple[bytes, str] | None:
         return None
 
     found = _fetch(f"https://{root}/favicon.ico") if _is_public_host(root) else None
-    found = found or _google(root) or _google(f"www.{root}")
+    offline = False
+    try:
+        found = found or _google(root) or _google(f"www.{root}")
+    except _Offline:
+        offline = True
     found = found or _fetch(f"https://icons.duckduckgo.com/ip3/{root}.ico")
     if not found:
-        miss.touch()
+        if not offline:  # no internet isn't "no icon": don't remember it, try again next time
+            miss.touch()
         return None
     body, kind = found
     hit.write_bytes(kind.encode() + b"\n" + body)

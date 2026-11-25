@@ -207,13 +207,15 @@ def _recipient_domains(service, ids: list[str], should_continue) -> set[str]:
 
     def on_sent(msg: dict):
         h = _headers(msg)
+        if gmail.SENT_MARK.lower() in h:
+            return  # an unsubscribe email this app sent isn't the user choosing to write
         for field in ("to", "cc"):
             for part in h.get(field, "").split(","):
                 d = _domain(part)
                 if d:
                     domains.add(d)
 
-    _batch_fetch(service, ids, ["To", "Cc"], on_sent, None, should_continue=should_continue)
+    _batch_fetch(service, ids, ["To", "Cc", gmail.SENT_MARK], on_sent, None, should_continue=should_continue)
     return domains
 
 

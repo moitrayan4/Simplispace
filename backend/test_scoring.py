@@ -141,6 +141,10 @@ def test_classify_page():
 
 
 def test_gmail_in_app():
+    # The window library can't run scripts containing these (they become syntax errors).
+    for script in (unsubscribe.GMAIL_NOTICES, unsubscribe.PAGE_TEXT):
+        assert "\\" not in script and "\n" not in script, script
+    assert unsubscribe.on_google("https://mail.google.com/mail") and not unsubscribe.on_google("https://evilgoogle.com")
     done = unsubscribe.gmail_done
     assert done("Unsubscribed from Intrainz") and done("You blocked x@intrainz.com")
     assert done("Message sent. Undo View message") and done("Conversation reported as spam")

@@ -32,10 +32,9 @@
         used, where it is stored, and how you can delete it.
       </p>
       <p class="note">
-        <strong>In short:</strong> Simplispace has read-only access to Gmail, reads email details but never
-        message bodies, and keeps data on your computer by default. If you enable AI second opinions, a limited
-        set of sender details and subject lines is sent to the AI provider configured for your copy of the app.
-        The developer does not receive your Gmail data.
+        <strong>In short:</strong> Simplispace has read-only access to Gmail unless you choose to let it send unsubscribe emails, reads email details but never
+        message bodies, and keeps data on your computer by default. If you turn on AI second opinions and ask for one, a few details about that sender are sent for analysis, as
+        described in section 4.
       </p>
 
       <h2>1. Google user data we access</h2>
@@ -67,18 +66,18 @@
         <li>offer ways to unsubscribe, and check afterwards whether the sender stopped emailing you.</li>
       </ul>
       <p>
-        Simplispace does not use your data for advertising or sell it. AI is off by default. When enabled, the
-        configured provider processes the limited fields described in section 4 to return a category and
-        confidence score. The provider’s own data-use and retention terms apply; review them before enabling AI.
+        Simplispace does not use your data for advertising and does not sell it. Simplispace does not use Google user
+        data, including Google Workspace API data, to develop, improve or train generalized or non-personalized AI
+        or machine-learning models. AI is off by default. When you turn it on and ask for a second opinion, the
+        fields described in section 4 are used only to return a category, a confidence score and an explanation.
       </p>
 
       <h2>3. Where your data is stored</h2>
       <p>
         App data is stored on your computer, in the app’s folder for your Windows user
         (<code>%LOCALAPPDATA%\Simplispace</code>). Your Google sign-in token is encrypted with a key generated
-        on your computer. Simplispace has no servers: the developer never receives your email data, your
-        sign-in, or your choices. If you explicitly enable AI, the request fields listed in section 4 are also
-        processed by the provider configured for the app.
+        on your computer. Your emails and your choices are not stored on any Simplispace server. The only server is the optional AI server
+        described in section 4, which does not store the details it is sent about a sender.
       </p>
 
       <h2>4. When data leaves your computer</h2>
@@ -86,12 +85,28 @@
       <ul>
         <li><strong>Google:</strong> to sign you in and to read the Gmail data described above, through
           Google’s official Gmail API.</li>
-        <li><strong>AI provider (optional):</strong> only after you enable AI in Settings and request a second
-          opinion, the app sends the ambiguous sender’s domain, up to three recent subject lines, and aggregate
-          scoring signals to the configured OpenAI-compatible endpoint. Subject lines may contain personal
-          information. Email bodies, attachments, Gmail IDs, and OAuth credentials are not sent. The endpoint
-          and model are configured by the person who set up this copy of Simplispace; review that provider’s
-          terms before opting in. You can turn AI off in Settings.</li>
+        <li><strong>AI second opinions (optional, off by default):</strong> only after you turn AI on in Settings and ask
+          for a second opinion about a sender.
+          <ul>
+            <li><strong>Simplispace AI server:</strong> the app sends that sender’s name, domain and numbers (such as how many emails it sent and how many you opened), with a Google ID token
+              that identifies your Google account so limits can be applied. The token cannot be used to read your
+              mail. The server, hosted on Cloudflare, looks up the company on its website and Wikipedia using
+              its domain and name only, then passes the sender, the numbers and what it found, not your identity, to the AI
+              provider Groq. It does not store or log them. To enforce usage limits it keeps a counter under a
+              scrambled form of your account ID, deleted two days after your last request. Subject lines are not
+              sent.</li>
+            <li><strong>Your own AI key:</strong> if you set up your own provider key, the same details and up to
+              three recent subject lines go directly to that provider instead. Subject lines may contain personal
+              information.</li>
+          </ul>
+          Email contents, attachments and Gmail access are never sent. Cloudflare, Groq and any provider you choose
+          handle data under their own terms. You can turn AI off in Settings.</li>
+        <li><strong>Unsubscribe emails (optional):</strong> for a sender with no unsubscribe option, you can ask AI to write
+          an unsubscribe email. That sender’s name, domain, email count and the number of days since its last email go to
+          the AI in the same way, and nothing about you is included. Sending it needs the extra
+          <code>https://www.googleapis.com/auth/gmail.send</code> permission, which is requested only when you first use
+          this. The email, which includes your address so you can be removed, is sent from your Gmail to the sender
+          only after you check it and press Send. The app sends nothing else.</li>
         <li><strong>Sender logos (optional):</strong> to show a sender’s logo, the app looks up that sender’s
           website address (for example <code>netflix.com</code>, never anything from your emails) once, using
           Google’s or DuckDuckGo’s website-icon service or the sender’s own website, and saves the logo on your
@@ -105,8 +120,7 @@
       <h2>5. Sharing</h2>
       <p>
         Simplispace does not sell your Google user data. Data leaves your computer only for the services listed
-        in section 4 and only to provide the feature you requested. If you enable AI, the configured AI provider
-        receives the fields described above under its own terms.
+        in section 4 and only to provide the feature you requested. If you use AI second opinions, the services described in section 4 receive the fields listed there.
       </p>
 
       <h2>6. Limited Use disclosure</h2>
@@ -130,7 +144,7 @@
 
       <h2>8. Security</h2>
       <p>
-        Your Google sign-in token is stored encrypted, the app only requests read-only access, and the app’s
+        Your Google sign-in token is stored encrypted, the app requests read-only access unless you choose to allow sending, and the app’s
         local service accepts requests only from the app itself.
       </p>
 

@@ -1,21 +1,20 @@
 import urllib.parse
 import urllib.request
-import threading
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from .. import ai, gmail, security, sync
 from ..config import settings
-from ..db import SessionLocal, get_db
-from ..models import AIClassification, Decision, HealthSnapshot, Message, User
+from ..db import get_db
+from ..models import AIClassification, Decision, HealthSnapshot, Message, UnsubAttempt, User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# Sign-in runs as a single background task in this single-process desktop app.
-# The installed-app OAuth flow owns its state and PKCE verifier through the callback.
-_login_lock = threading.Lock()
-_login_status = {"running": False, "error": None}
+# ponytail: in-memory state -> PKCE verifier store. Single-process desktop app,
+# so a dict is enough; move to a shared store only if the API goes multi-worker.
+_pending_states: dict[str, str] = {}
 
 
 def active_user(db: Session) -> User | None:
@@ -41,61 +40,78 @@ def _revoke(user: User) -> None:
 
 def purge_user(db: Session, user: User) -> None:
     """Delete the account and every row stored for it."""
-    for model in (Message, Decision, HealthSnapshot, AIClassification):
+    gmail.forget_id_token(user.email)
+    for model in (Message, Decision, HealthSnapshot, AIClassification, UnsubAttempt):
         db.query(model).filter(model.user_id == user.id).delete(synchronize_session=False)
     db.delete(user)
     db.commit()
     sync.bump_data_version()  # drop cached scores
 
 
-def _desktop_login_worker() -> None:
-    db = SessionLocal()
-    try:
-        creds = gmail.authorize_desktop()
-        email = gmail.user_email(creds)
-        encrypted = security.encrypt(gmail.credentials_to_json(creds))
-
-        db.query(User).filter(User.email != email).update({User.signed_in: False})
-        user = db.query(User).filter(User.email == email).first()
-        if user:
-            user.encrypted_token = encrypted
-            user.signed_in = True
-        else:
-            db.add(User(email=email, encrypted_token=encrypted, signed_in=True))
-        db.commit()
-        sync.bump_data_version()
-    except Exception as error:
-        db.rollback()
-        with _login_lock:
-            _login_status["error"] = str(error) or "Google sign-in did not complete."
-    finally:
-        db.close()
-        with _login_lock:
-            _login_status["running"] = False
-
-
-@router.post("/login")
-def login():
+@router.get("/login")
+def login(send: bool = False, db: Session = Depends(get_db)):
+    """Start sign-in. `send` also asks to send email, for the account already signed in."""
     if not settings.google_client_id:
         raise HTTPException(500, "Google OAuth not configured (see backend/.env.example).")
-    with _login_lock:
-        if not _login_status["running"]:
-            _login_status["running"] = True
-            _login_status["error"] = None
-            threading.Thread(target=_desktop_login_worker, daemon=True).start()
-    return {"started": True}
+    user = active_user(db) if send else None
+    url, state, code_verifier = gmail.authorization_url(send=bool(user), email=user.email if user else None)
+    while len(_pending_states) >= 20:  # abandoned sign-ins: drop the oldest
+        _pending_states.pop(next(iter(_pending_states)))
+    _pending_states[state] = code_verifier
+    return RedirectResponse(url)
+
+
+@router.get("/callback")
+def callback(
+    state: str = Query(..., max_length=200),
+    code: str | None = Query(None, max_length=2000),
+    error: str | None = Query(None, max_length=200),
+    db: Session = Depends(get_db),
+):
+    # state is the CSRF check for sign-in: it must be one this app just issued.
+    if state not in _pending_states:
+        raise HTTPException(400, "Invalid OAuth state.")
+    if error or not code:  # e.g. the user pressed Cancel on Google's consent screen
+        _pending_states.pop(state, None)
+        return RedirectResponse(f"{settings.frontend_origin}/")
+    code_verifier = _pending_states.pop(state)
+
+    try:
+        creds = gmail.exchange_code(code, state, code_verifier)
+        email = gmail.user_email(creds)
+        enc = security.encrypt(gmail.credentials_to_json(creds))
+    except gmail.GmailNotAllowed:
+        return RedirectResponse(f"{settings.frontend_origin}/?login_error=gmail")
+    except Exception as e:
+        # Back to the app with the kind of error only: messages can contain sign-in details.
+        return RedirectResponse(f"{settings.frontend_origin}/?login_error={type(e).__name__}")
+
+    # One account signed in at a time. Signing back in to an account that logged out
+    # brings its senders and choices straight back.
+    db.query(User).filter(User.email != email).update({User.signed_in: False})
+    user = db.query(User).filter(User.email == email).first()
+    if user:
+        user.encrypted_token = enc
+        user.signed_in = True
+    else:
+        db.add(User(email=email, encrypted_token=enc, signed_in=True))
+    db.commit()
+    sync.bump_data_version()
+    return RedirectResponse(f"{settings.frontend_origin}/?connected=1")
+
+
+def _can_send(user: User) -> bool:
+    try:
+        return gmail.can_send(gmail.credentials_from_json(security.decrypt(user.encrypted_token)))
+    except Exception:  # no usable saved sign-in
+        return False
 
 
 @router.get("/status")
 def status(db: Session = Depends(get_db)):
     user = active_user(db)
-    with _login_lock:
-        login_state = {
-            "login_in_progress": _login_status["running"],
-            "login_error": _login_status["error"],
-        }
     if not user:
-        return {"connected": False, **login_state}
+        return {"connected": False}
     # Database timestamps are stored as naive UTC for SQLite compatibility.
     # Mark the value explicitly so clients convert it to their local timezone.
     last_synced_at = (
@@ -103,15 +119,11 @@ def status(db: Session = Depends(get_db)):
     )
     return {
         "connected": True,
-        **login_state,
         # Data is still here, but Google's token was revoked or expired.
         "needs_reconnect": not user.encrypted_token,
         "email": user.email,
-        "ai_enabled": bool(user.ai_enabled),
-        "ai_available": ai.provider_ready(),
-        "ai_setup_hint": ai.setup_message(),
-        "ai_provider": ai.provider_label(),
-        "ai_model": settings.ai_model.strip() if ai.provider_ready() else None,
+        "can_send": _can_send(user),
+        **ai.account_fields(user),
         "last_synced_at": last_synced_at,
         # True until the first pass through the whole inbox has finished.
         "indexing": not user.history_id,
@@ -126,6 +138,7 @@ def logout(db: Session = Depends(get_db)):
     user = active_user(db)
     if user:
         _revoke(user)
+        gmail.forget_id_token(user.email)
         user.encrypted_token = ""
         user.signed_in = False
         db.commit()

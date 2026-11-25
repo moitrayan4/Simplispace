@@ -16,3 +16,6 @@ dist/
 icons/
 DOC.md
 logo.jpg
+server/node_modules/
+.wrangler/
+.dev.vars*

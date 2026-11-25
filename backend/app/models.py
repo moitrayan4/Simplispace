@@ -70,9 +70,27 @@ class Decision(Base):
     unsubscribed_via: Mapped[str | None] = mapped_column(String, nullable=True)  # one_click | link | mailto
     unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # What the sender's page said when it was opened inside the app:
-    # in_progress | success | failed | unclear (None when opened outside the app).
+    # in_progress | success | failed | visited (sender's page shown, result left to the
+    # mailbox check) | rejected (email bounced) | auto_reply | unclear (None when opened outside the app).
     page_result: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UnsubAttempt(Base):
+    """Ways already tried for a sender with no unsubscribe option, so the next one is offered.
+    Kept when the decision itself is undone."""
+
+    __tablename__ = "unsub_attempts"
+    __table_args__ = (UniqueConstraint("user_id", "domain", "method", name="uq_user_unsub_attempt"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    domain: Mapped[str] = mapped_column(String)
+    method: Mapped[str] = mapped_column(String)  # email | block
+    failed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # For emails: what to look for among the replies.
+    to_address: Mapped[str | None] = mapped_column(String, nullable=True)
+    subject: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class HealthSnapshot(Base):

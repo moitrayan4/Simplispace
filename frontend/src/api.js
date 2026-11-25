@@ -33,7 +33,6 @@ const enc = encodeURIComponent;
 export const api = {
   base: BASE,
   status: () => json("/auth/status"),
-  login: () => json("/auth/login", { method: "POST" }),
   startSync: (nextPage = false) =>
     json(`/sync?next_page=${nextPage === true ? "true" : "false"}`, { method: "POST" }),
   syncStatus: () => json("/sync/status"),
@@ -60,4 +59,8 @@ export const api = {
   openInApp: (url) => json("/open-in-app", { method: "POST", body: JSON.stringify({ url }) }),
   logout: () => json("/auth/logout", { method: "POST" }),
   deleteAccount: () => json("/auth/delete-account", { method: "POST" }),
+  draftEmail: (domain) => json(`/unsubscribe/${enc(domain)}/email/draft`, { method: "POST" }),
+  sendEmail: (domain, email) =>
+    json(`/unsubscribe/${enc(domain)}/email/send`, { method: "POST", body: JSON.stringify(email) }),
+  loginUrl: (send = false) => BASE + "/auth/login" + (send ? "?send=true" : ""),
 };
