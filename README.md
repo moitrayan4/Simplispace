@@ -1,6 +1,6 @@
 # Simplispace
 
-**A Windows desktop app** that connects a Gmail inbox (read-only, metadata only),
+**A Windows desktop app** that connects a Gmail inbox (metadata only, read-only by default),
 groups mail by sending service, scores each sender with a transparent rule-based
 engine, and optionally requests an AI second opinion for ambiguous senders. It helps
 you keep or unsubscribe. It ships as a single `Simplispace.exe`.
@@ -118,13 +118,15 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
 Output: `dist\Simplispace.exe`, a single file anyone can run. The build bundles only
-the app's Google OAuth desktop client (`GOOGLE_CLIENT_ID/SECRET` from
-`backend\.env`); the developer's `FERNET_KEY` and data are never shipped. On first
+the app's Google OAuth desktop client and the AI server's address (`GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET` and `AI_SERVER_URL` from `backend\.env`); the developer's `FERNET_KEY`,
+`AI_API_KEY` and data are never shipped. On first
 launch each Windows user gets `%LOCALAPPDATA%\Simplispace` with their own database,
 sign-in, icon cache and a new encryption key sealed with Windows DPAPI.
 
 **Public release:** the app requests `gmail.readonly`, which Google classifies as a
-restricted OAuth scope. Before offering the app broadly, configure and publish the
+restricted OAuth scope, and `gmail.send` (sensitive) when someone first sends an unsubscribe
+email. Google also doesn't allow sign-in inside app windows, so that has to move to the browser first. Before offering the app broadly, configure and publish the
 consent screen, complete Google's OAuth verification for the scope, and satisfy any
 additional review requirements Google identifies. Testing-mode accounts are limited
 to configured test users and may need to reconnect when refresh tokens expire.
@@ -143,10 +145,12 @@ retried with backoff.
 per sender, and keyboard shortcuts (arrows, `K` keep, `U` unsubscribe, `X` select,
 `E` recent emails).
 
-**Unsubscribe:** nothing happens until you confirm a method: a one-click request
-(RFC 8058, sent to the sender's own HTTPS endpoint), the sender's unsubscribe page,
-or an unsubscribe email draft. Signing in asks only for read access. For senders with no unsubscribe option, AI drafts an
-email that the user checks and sends from their own Gmail; `gmail.send` is requested only then. Any unsubscribe can be undone from its card or from History.
+**Unsubscribe:** nothing happens until you choose a method. Senders with an unsubscribe header get a
+one-click request (RFC 8058, sent to the sender's own HTTPS endpoint) and Gmail's own Unsubscribe button,
+which opens in a Simplispace window that reads Gmail's notice, so you're never asked whether it worked. For
+senders with no option, AI drafts an email that you check and send from your own Gmail (`gmail.send` is
+requested only then); if it bounces or gets an automatic reply, blocking in Gmail is offered. Undo resets
+Simplispace's record; it can't reverse a real unsubscribe, email or block.
 
 **Health score:** the share of the last 90 days of mail from Important/Useful
 senders (Optional counts half), excluding senders you unsubscribed from. Savings
@@ -156,12 +160,13 @@ estimates use each sender's monthly volume and 10 seconds per email.
 Cloudflare Worker that holds the Groq key) about ambiguous senders. Set its address as `AI_SERVER_URL` in
 `backend/.env`; `build_exe.ps1` ships that address, and never an AI key. Users are identified by a Google ID
 token and limited per account and overall. It gets the sender's name, domain and counts,
-never subject lines, and looks the company up on its website and Wikipedia. Developers can set their own `AI_API_KEY` instead, which takes priority, calls any OpenAI-compatible
-endpoint directly and also sends up to three recent subject lines. Results are cached per sender, and the
+never subject lines, and looks the company up on its website and Wikipedia. It accepts only sign-ins made
+with the project's own Desktop client. Developers can set their own `AI_API_KEY` instead, which takes
+priority, calls any OpenAI-compatible endpoint directly and also sends up to three recent subject lines. Results are cached per sender, and the
 rule-based category always stays visible. See `server/README.md` to deploy.
 
-**Logout vs delete:** Logout removes Gmail access but keeps senders and analysis for
-the next sign-in. Delete account in Settings erases everything.
+**Logout vs delete:** Logout removes Gmail access and signs out of Google in the app window, but keeps
+senders and analysis for the next sign-in. Delete account in Settings erases everything.
 
 ## Tests
 
@@ -173,6 +178,9 @@ cd backend
 ..\mail\Scripts\python.exe test_unsubscribe.py
 ..\mail\Scripts\python.exe test_email.py
 ..\mail\Scripts\python.exe test_security.py
+
+# AI server, from server\
+npm install; npm test
 ```
 
 ## API
@@ -180,7 +188,8 @@ cd backend
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | /health | liveness |
-| GET | /auth/login | start Google OAuth in the app window |
+| GET | /start/{code} | one-time: gives the app window its session cookie |
+| GET | /auth/login | start Google OAuth in the app window (`?send=true` adds sending) |
 | GET | /auth/callback | OAuth redirect target |
 | GET | /auth/status | connected account and last sync |
 | POST | /auth/logout | revoke Gmail access, keep local data |
@@ -189,17 +198,21 @@ cd backend
 | GET | /sync/status | sync progress |
 | GET | /services | scored, categorized sender list |
 | PUT | /ai/preferences | enable/disable AI with per-account consent |
-| POST | /services/{domain}/ai-classification | classify an eligible ambiguous sender |
+| POST | /services/{domain}/ai-classification | ask AI about an eligible ambiguous sender |
+| DELETE | /services/{domain}/ai-classification | dismiss the AI opinion |
 | GET | /services/{domain}/emails | 10 most recent emails from a sender |
 | GET | /icon/{domain} | cached sender icon |
 | GET | /decisions | saved Keep/Unsubscribe decisions |
 | PUT | /decisions/{domain} | keep or reset a sender (`{"decision": "keep"\|null}`) |
 | GET | /unsubscribe/{domain} | unsubscribe methods the sender offers |
 | POST | /unsubscribe/{domain} | run a confirmed unsubscribe (`{"method": "one_click"\|"gmail"\|"block"}`) |
+| POST | /unsubscribe/{domain}/email/draft | draft an unsubscribe email (sender with no unsubscribe option) |
+| POST | /unsubscribe/{domain}/email/send | send the checked draft from the user's Gmail |
 | POST | /unsubscribe/{domain}/answer | record whether a manual unsubscribe worked |
 | POST | /open-in-app | open a link in a Simplispace window |
 | GET | /insights | health score, history, emails and time saved |
 
-POST/PUT requests must carry the `X-Simplispace: 1` header, and only
-`localhost`/`127.0.0.1` Host headers are accepted, so other websites can't drive the
-local API.
+In the desktop app, everything except the page itself, `/health`, `/start/…` and `/auth/callback` needs the
+session cookie that only the app's own window gets, so other programs and Windows users can't use the API.
+Writes must also carry the `X-Simplispace: 1` header, and only `localhost`/`127.0.0.1` Host headers are
+accepted, so other websites can't drive it.
