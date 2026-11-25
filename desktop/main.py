@@ -159,6 +159,25 @@ def _keep_popups_in_app():
     EdgeChrome.on_new_window_request = on_new_window_request
 
 
+class _ActionWindow:
+    """What the API may do with an open Gmail window."""
+
+    def __init__(self, win):
+        self._win = win
+
+    @property
+    def closed(self) -> bool:
+        return self._win.events.closed.is_set()
+
+    def close(self):
+        if not self.closed:
+            self._win.destroy()
+
+    def show(self):
+        self._win.restore()
+        self._win.show()
+
+
 def _open_in_app(url, title, on_page, on_closed, script="document.body ? document.body.innerText : ''"):
     """Open a page (an unsubscribe page, or Gmail) in a Simplispace window and report
     what it shows, so the app can acknowledge the result itself.
@@ -186,8 +205,14 @@ def _open_in_app(url, title, on_page, on_closed, script="document.body ? documen
             reader = threading.Thread(target=read, args=(out,), daemon=True)
             reader.start()
             reader.join(3)
-            if out and on_page(*out[0]):
-                threading.Timer(2.5, win.destroy).start()  # let the user see the confirmation
+            try:
+                done = bool(out) and on_page(*out[0])
+            except Exception:
+                continue  # couldn't save it just now: the notice is still there, so try again
+            if done:
+                closing.wait(2.5)  # let the user see the confirmation
+                if not closing.is_set():
+                    win.destroy()
                 return
 
     def closed():
@@ -202,6 +227,7 @@ def _open_in_app(url, title, on_page, on_closed, script="document.body ? documen
     # Started here, not on the "shown" event: the window may already be on screen, and a
     # listener added too late is never called.
     threading.Thread(target=watch, daemon=True).start()
+    return _ActionWindow(win)
 
 
 def _listen() -> list[socket.socket]:
@@ -263,6 +289,17 @@ def main():
 
     # Persist the WebView2 session so the Google login survives restarts.
     window = webview.create_window("Simplispace", API + session.new_start_path(), width=1120, height=780, maximized=True)
+
+    def close_others():
+        # Closing Simplispace closes everything: a leftover Gmail window would keep the app
+        # running invisibly, and opening it again would show nothing.
+        for win in list(_action_windows):
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    window.events.closed += close_others
 
     def forget_google():
         # Signing out of Simplispace must also sign out of Google in this window, or the next

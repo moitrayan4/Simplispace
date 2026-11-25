@@ -55,6 +55,10 @@ def ensure_schema():
         decision_columns = {column["name"] for column in inspector.get_columns("decisions")}
         if "page_result" not in decision_columns:
             connection.execute(text("ALTER TABLE decisions ADD COLUMN page_result TEXT"))
+        attempt_columns = {column["name"] for column in inspector.get_columns("unsub_attempts")}
+        for column, kind in (("sent_id", "TEXT"), ("thread_id", "TEXT"), ("sent_ok", "BOOLEAN DEFAULT 0")):
+            if column not in attempt_columns:
+                connection.execute(text(f"ALTER TABLE unsub_attempts ADD COLUMN {column} {kind}"))
         if "logo_url" not in message_columns:
             connection.execute(text("ALTER TABLE messages ADD COLUMN logo_url TEXT DEFAULT ''"))
 

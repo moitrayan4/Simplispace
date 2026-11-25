@@ -23,6 +23,7 @@ DIST = Path(
 
 Base.metadata.create_all(bind=engine)
 ensure_schema()
+services.forget_unfinished()
 
 # No interactive API docs or schema in the shipped app: nothing for a caller to explore.
 app = FastAPI(title="Simplispace API", docs_url=None, redoc_url=None, openapi_url=None)

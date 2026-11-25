@@ -17,6 +17,9 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timedelta
 
+ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
+# Mailing lists put long tracking codes before the @, well past the usual 64 characters.
+_LIST_ADDRESS = re.compile(ADDRESS.pattern.replace("{1,64}", "{1,600}"))
 _TARGET = re.compile(r"<([^>]+)>")
 _ONE_CLICK_BODY = b"List-Unsubscribe=One-Click"
 
@@ -24,8 +27,10 @@ _ONE_CLICK_BODY = b"List-Unsubscribe=One-Click"
 def parse(list_unsubscribe: str, list_unsubscribe_post: str = "") -> dict:
     """Split List-Unsubscribe into the first web link and first mailto target."""
     link = mailto = None
-    for target in _TARGET.findall(list_unsubscribe or ""):
-        target = target.strip()
+    header = (list_unsubscribe or "").strip()
+    # Some senders leave out the <...> the standard asks for.
+    for target in _TARGET.findall(header) or header.split():
+        target = target.strip().rstrip(",")
         scheme = urllib.parse.urlsplit(target).scheme.lower()
         if scheme in ("https", "http") and not link:
             link = target
@@ -127,8 +132,8 @@ def verification(
         return "page_confirmed"
     if page_result == "failed":
         return "page_failed"
-    if page_result == "rejected":
-        return "rejected"
+    if page_result in ("rejected", "not_sent", "acknowledged"):
+        return page_result
     if page_result == "unclear":
         return "needs_answer"
     if last_synced_at and last_synced_at >= unsubscribed_at + CONFIRM_AFTER:
@@ -137,7 +142,7 @@ def verification(
 
 
 # Outcomes that mean "offer the next way".
-FAILED_STATUSES = {"still_sending", "page_failed", "rejected", "auto_reply"}
+FAILED_STATUSES = {"still_sending", "page_failed", "rejected", "not_sent", "auto_reply"}
 # For senders with no unsubscribe option, in the order they are offered.
 STEPS = ("email", "block")
 STEP_OF = {"ai_email": "email", "block": "block"}
@@ -149,31 +154,85 @@ def is_no_reply(address: str) -> bool:
     return bool(_NO_REPLY.match(address or ""))
 
 
-# Headers that say how a reply was made. The reply's text is never read.
-REPLY_HEADERS = ["Auto-Submitted", "X-Autoreply", "X-Autorespond", "Precedence", "X-Failed-Recipients"]
+# --- What became of an unsubscribe email --------------------------------------
+# Only replies to emails this app sent are looked at: their headers, subject and the one-line
+# preview Gmail shows in its list. The preview is used here and never stored or sent on.
+REPLY_HEADERS = ["From", "Subject", "Auto-Submitted", "X-Autoreply", "X-Autorespond", "Precedence", "X-Failed-Recipients"]
+
+_SENTENCE = re.compile(r"[.!?;\n]+\s*|\s+[-–|]\s+")
+_WILL_NOT_GET = re.compile(r"\b(?:will not|won['’]t|should not|shouldn['’]t|no longer)\b.{0,20}\b(?:receive|get|hear from|be (?:sent|emailed|contacted))\b")
+_DONE = re.compile(
+    r"\b(?:you|you['’]re|you['’]ve|your (?:e-?mail(?: address)?|address|subscription|account|details|name))\b.{0,60}\b(?:unsubscribed|removed|opted out|taken off|cancell?ed)\b"
+    r"|\bwe(?:['’]ve| have)?(?: now| successfully)? (?:unsubscribed|removed|opted|taken) you"
+    r"|\b(?:successfully|now) (?:unsubscribed|removed|opted out)\b"
+    r"|\bunsubscri(?:be|ption)(?: request)?(?: was| is| has been)? (?:successful|processed|completed?|confirmed)\b"
+    r"|\brequest (?:has been|was|is) (?:processed|completed?|actioned|honou?red)\b"
+)
+_NO = re.compile(r"\bnot\b|\bcannot\b|n['’]t\b|\bunable\b|\bfailed\b|\bif you\b|\bto be (?:removed|unsubscribed)\b|\b(?:would|want|wish|like|need) to\b")
+_REFUSED = re.compile(
+    r"\b(?:can ?not|can['’]t|unable to|not able to|does(?: not|n['’]t)|do(?: not|n['’]t)|could(?: not|n['’]t)|will not|won['’]t|is(?: not|n['’]t)|are(?: not|n['’]t)|was(?: not|n['’]t))\b"
+    r".{0,40}\b(?:accept|receive|respond|reply|process|deliver(?:ed)?|read|answered|monitored|unsubscribe|remove|complete|attended|in use|valid)\b"
+    r"|\bunmonitored\b|\bunattended\b|\bundeliverable\b|\bno one (?:reads|monitors)\b|\bno longer (?:in use|active|monitored|exists?|valid)\b"
+    r"|\bmailbox (?:is )?(?:full|unavailable|not found)\b|\b(?:address|user|recipient)\b.{0,30}\b(?:not found|unknown|invalid|does not exist)\b"
+    r"|\bdelivery\b.{0,20}\bfail"
+)
+_RECEIVED = re.compile(
+    r"\b(?:received|got) your (?:unsubscribe |opt[- ]?out )?(?:request|message|e-?mail|enquiry|inquiry|query)\b"
+    r"|\byour (?:request|ticket|case|message|e-?mail|enquiry|inquiry) (?:has been |was |is )?(?:received|created|logged|opened|submitted|registered)\b"
+    r"|\b(?:request|ticket|case) (?:has been |was )(?:received|created|logged|opened|submitted|registered)\b"
+    r"|\bthank(?:s| you) for (?:contacting|reaching|writing|getting in touch|your (?:e-?mail|message|request))\b"
+    r"|\bwe(?:['’]ll| will| are)\b.{0,40}\b(?:get back|respond|look(?:ing)? into|process(?:ing)?|review(?:ing)?|unsubscribe|remove)\b"
+)
+_AWAY = re.compile(r"\bout of (?:the )?office\b|\bon (?:annual |sick )?leave\b|\bvacation\b|\baway from\b")
+_DELAYED = re.compile(r"\bdelay|\bincomplete\b|\btemporar|\bretry|\btry again\b|\bstill being\b")
 
 
-def reply_kind(
-    headers: dict, sender: str, subject: str, seconds_after: float, to: str | None, sent_subject: str | None
-) -> str | None:
-    """'rejected' (it bounced), 'auto_reply', or None for anything else (a person, a newsletter)."""
-    bounced = [a.strip().lower() for a in headers.get("x-failed-recipients", "").split(",")]
-    if to and to.lower() in bounced:
+def reply_meaning(text: str) -> str | None:
+    """'success' (you're unsubscribed) | 'rejected' (not accepted) | 'acknowledged' (received) | None."""
+    sentences = [x for x in _SENTENCE.split((text or "").lower()) if x]
+    # Saying it's done wins: such emails often end with "this mailbox is not monitored".
+    for x in sentences:
+        if (_WILL_NOT_GET.search(x) and "you" in x and not re.search(r"\bif you\b", x)) or (_DONE.search(x) and not _NO.search(x)):
+            return "success"
+    if any(_REFUSED.search(x) for x in sentences):
         return "rejected"
-    if sender.split("@")[0] in ("mailer-daemon", "postmaster"):
-        return None  # a delay notice, or about some other email
-    base = lambda s: re.sub(r"^((re|aw|auto(matic)?([- ]?reply)?)\s*:\s*)+", "", (s or "").strip().lower())  # noqa: E731
-    about_ours = bool(sent_subject) and base(sent_subject) in base(subject)
-    labelled = (
+    if any(_AWAY.search(x) for x in sentences):
+        return None
+    return "acknowledged" if any(_RECEIVED.search(x) for x in sentences) else None
+
+
+def is_reply(subject: str, sent_subject: str | None, headers: dict, in_thread: bool, sender: str, seconds_after: float) -> bool:
+    """Whether a message answers our email. Anything else from the sender is just their mail."""
+    if in_thread or _labelled_automatic(headers):
+        return True
+    strip = lambda s: re.sub(r"^((re|aw|fwd?|auto(matic)?([- ]?reply)?)\s*:\s*)+", "", (s or "").strip().lower())  # noqa: E731
+    ours, theirs = strip(sent_subject), strip(subject)
+    if ours and (ours == theirs or (len(ours) >= 12 and ours in theirs)):
+        return True
+    return not ours and seconds_after <= 600 and is_no_reply(sender)
+
+
+def _labelled_automatic(headers: dict) -> bool:
+    return (
         headers.get("auto-submitted", "").lower().startswith("auto-replied")
         or "x-autoreply" in headers or "x-autorespond" in headers
         or headers.get("precedence", "").lower() == "auto_reply"
     )
-    if labelled:
-        return "auto_reply"
-    # Unlabelled, like Etsy's: the same subject straight back from a no-reply address.
-    quick = seconds_after <= 600 and is_no_reply(sender)
-    return "auto_reply" if quick and (about_ours or not sent_subject) else None
+
+
+def reply_kind(headers: dict, sender: str, subject: str, preview: str, to: str | None, in_thread: bool) -> str | None:
+    """What a reply says happened: 'success' | 'rejected' | 'acknowledged' | 'auto_reply' | None."""
+    bounced = [a.strip().lower() for a in headers.get("x-failed-recipients", "").split(",")]
+    if to and to.lower() in bounced:
+        return "rejected"
+    text = f"{subject}. {preview}"
+    if sender.split("@")[0] in ("mailer-daemon", "postmaster"):
+        # A bounce that names nobody is ours only in our own conversation; others are about other emails.
+        return "rejected" if in_thread and not any(bounced) and _REFUSED.search(text.lower()) and not _DELAYED.search(text.lower()) else None
+    meaning = reply_meaning(text)
+    if meaning:
+        return meaning
+    return "auto_reply" if _labelled_automatic(headers) or is_no_reply(sender) else None
 
 
 # A link in an email can lead anywhere; only pages about email settings count.
@@ -188,7 +247,8 @@ def is_unsubscribe_page(url: str, text: str) -> bool:
 
 # --- Reading the sender's page (desktop app only) ----------------------------
 # The desktop shell sets this to open a URL in an in-app window. It is called as
-# opener(url, title, on_page, on_closed, script): `script` is JavaScript whose result
+# opener(url, title, on_page, on_closed, script) and returns the window (close(), show()),
+# or None: `script` is JavaScript whose result
 # is passed as on_page(url, text) about once a second; on_page returns True to
 # close the window. on_closed() runs when the window closes.
 in_app_opener = None
@@ -212,12 +272,35 @@ def on_google(url: str) -> bool:
     host = (urllib.parse.urlsplit(url).hostname or "").lower()
     return host == "google.com" or host.endswith(".google.com")
 
-_GMAIL_DONE = ("unsubscribed", "unsubscribe request sent", "blocked", "reported as spam", "marked as spam", "message sent")
+_GMAIL_UNSUBSCRIBED = re.compile(r"\bunsubscribed\b|\bunsubscribe request sent\b")
+_GMAIL_BLOCKED = re.compile(r"\bblocked\b|\b(reported|marked) as spam\b")  # not "unblocked"
+_GMAIL_NOT = re.compile(r"\bnot\b|\bunable\b|n['’]t\b|\bfailed\b|\berror\b|\bsomething went wrong\b")
 
 
-def gmail_done(notices: str) -> bool:
-    text = (notices or "").lower()
-    return any(p in text for p in _GMAIL_DONE)
+def gmail_result(notices: str) -> str | None:
+    """'unsubscribed' | 'blocked' | None, from Gmail's own notices (one per line or " | ")."""
+    for notice in re.split(r"\||\n", (notices or "").lower()):
+        if _GMAIL_NOT.search(notice):
+            continue
+        if _GMAIL_UNSUBSCRIBED.search(notice):
+            return "unsubscribed"
+        if _GMAIL_BLOCKED.search(notice):
+            return "blocked"
+    return None
+
+
+def email_target(mailto: str | None) -> tuple[str, str] | None:
+    """(address, subject) of a List-Unsubscribe mailto, if it is safe to send for the user.
+
+    The sender writes this, so only an address and a short subject are taken; a body, extra
+    recipients and everything else are ignored."""
+    parts = urllib.parse.urlsplit(mailto or "")
+    if parts.scheme.lower() != "mailto":
+        return None
+    to = urllib.parse.unquote(parts.path).strip()  # tracking codes can be case-sensitive
+    subject = dict(urllib.parse.parse_qsl(parts.query)).get("subject", "unsubscribe")
+    subject = " ".join(subject.split())[:150] or "unsubscribe"
+    return (to, subject) if _LIST_ADDRESS.fullmatch(to) and subject.isprintable() else None
 
 
 _FAILED = (

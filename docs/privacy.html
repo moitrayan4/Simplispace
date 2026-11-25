@@ -106,7 +106,11 @@
           the AI in the same way, and nothing about you is included. Sending it needs the extra
           <code>https://www.googleapis.com/auth/gmail.send</code> permission, which is requested only when you first use
           this. The email, which includes your address so you can be removed, is sent from your Gmail to the sender
-          only after you check it and press Send. The app sends nothing else.</li>
+          only after you check it and press Send. Some senders instead publish an address for unsubscribing; when
+          you choose to unsubscribe from one of them by email, including as part of a bulk unsubscribe, the app
+          sends a short standard message to that address from your Gmail. The app sends nothing else. To see whether an unsubscribe email worked, the app looks for it in your Sent mail and for replies to it,
+          reading the replies’ subject, technical headers and the one-line preview Gmail provides. Those previews are
+          used on your computer only and are not stored or sent to anyone.</li>
         <li><strong>Sender logos (optional):</strong> to show a sender’s logo, the app looks up that sender’s
           website address (for example <code>netflix.com</code>, never anything from your emails) once, using
           Google’s or DuckDuckGo’s website-icon service or the sender’s own website, and saves the logo on your

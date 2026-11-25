@@ -23,7 +23,9 @@ async function json(path, opts = {}) {
     } catch {
       /* plain-text error */
     }
-    throw new Error(typeof message === "string" && message ? message : res.statusText);
+    const error = new Error(typeof message === "string" && message ? message : res.statusText);
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
@@ -48,11 +50,10 @@ export const api = {
   setDecision: (domain, decision) =>
     json(`/decisions/${enc(domain)}`, { method: "PUT", body: JSON.stringify({ decision }) }),
   unsubscribeOptions: (domain) => json(`/unsubscribe/${enc(domain)}`),
-  unsubscribe: (domain, method, noFallback = false) =>
-    json(`/unsubscribe/${enc(domain)}`, {
-      method: "POST",
-      body: JSON.stringify({ method, no_fallback: noFallback }),
-    }),
+  unsubscribe: (domain, method) =>
+    json(`/unsubscribe/${enc(domain)}`, { method: "POST", body: JSON.stringify({ method }) }),
+  unsubscribeWindow: (domain, action) =>
+    json(`/unsubscribe/${enc(domain)}/window`, { method: "POST", body: JSON.stringify({ action }) }),
   senderEmails: (domain) => json(`/services/${enc(domain)}/emails`),
   answerUnsubscribe: (domain, worked) =>
     json(`/unsubscribe/${enc(domain)}/answer`, { method: "POST", body: JSON.stringify({ worked }) }),

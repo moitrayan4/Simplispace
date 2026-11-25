@@ -138,8 +138,9 @@ def status(db: Session = Depends(get_db)):
 @router.post("/logout")
 def logout(db: Session = Depends(get_db)):
     """Sign out: forget the Gmail sign-in, keep this account's data for next time."""
-    from .services import cancel_sync
+    from .services import cancel_sync, close_windows
     cancel_sync()
+    close_windows()
     user = active_user(db)
     if user:
         _revoke(user)
@@ -155,8 +156,9 @@ def logout(db: Session = Depends(get_db)):
 @router.post("/delete-account")
 def delete_account(db: Session = Depends(get_db)):
     """Delete the account: end Gmail access and erase everything stored for it."""
-    from .services import cancel_sync
+    from .services import cancel_sync, close_windows
     cancel_sync()
+    close_windows()
     user = active_user(db)
     if user:
         _revoke(user)  # best effort; local deletion below is the guarantee

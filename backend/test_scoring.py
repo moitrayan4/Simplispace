@@ -102,6 +102,10 @@ def test_unsubscribe_parse():
     assert unsubscribe.parse("<https://x.com/u>")["one_click"] is False
     assert unsubscribe.parse("<http://x.com/u>", "List-Unsubscribe=One-Click")["one_click"] is False
     # unsupported schemes are ignored
+    bare = unsubscribe.parse("https://x.com/u?a=1,2", "List-Unsubscribe=One-Click")  # no <...>
+    assert bare["one_click"] and bare["link"] == "https://x.com/u?a=1,2"
+    assert unsubscribe.parse("mailto:u@x.com, https://x.com/u") == {"one_click": False, "link": "https://x.com/u", "mailto": "mailto:u@x.com"}
+    assert unsubscribe.parse("javascript:alert(1) file:///c:/x none")["link"] is None
     assert unsubscribe.parse("<javascript:alert(1)>, <file:///c:/x>") == {"one_click": False, "link": None, "mailto": None}
     # one-click refuses private/loopback targets
     for bad in ("https://127.0.0.1/u", "https://localhost/u", "http://example.com/u"):
@@ -145,10 +149,22 @@ def test_gmail_in_app():
     for script in (unsubscribe.GMAIL_NOTICES, unsubscribe.PAGE_TEXT):
         assert "\\" not in script and "\n" not in script, script
     assert unsubscribe.on_google("https://mail.google.com/mail") and not unsubscribe.on_google("https://evilgoogle.com")
-    done = unsubscribe.gmail_done
-    assert done("Unsubscribed from Intrainz") and done("You blocked x@intrainz.com")
-    assert done("Message sent. Undo View message") and done("Conversation reported as spam")
-    assert not done("") and not done("Conversation archived. Undo")
+    done = unsubscribe.gmail_result
+    assert done("You unsubscribed from Shop | Undo") == "unsubscribed"
+    assert done("Conversation archived\nUnsubscribe request sent") == "unsubscribed"
+    assert done("You blocked Shop. Future messages go to Spam.") == "blocked" == done("Conversation reported as spam")
+    for other in ("", "You unblocked Shop", "Message sent", "You have not been unsubscribed", "Couldn't unsubscribe. You are not unsubscribed.",
+                  "Can’t be unsubscribed right now", "Unable to mark as spam: reported as spam failed", "Unsubscribing…"):
+        assert done(other) is None, other
+    # One notice saying no doesn't hide another saying yes.
+    assert done("Couldn't load images | You unsubscribed from Shop") == "unsubscribed"
+    target = unsubscribe.email_target
+    assert target("mailto:off@list.shop.com?subject=Unsubscribe%20me") == ("off@list.shop.com", "Unsubscribe me")
+    assert target("mailto:OFF@list.shop.com") == ("OFF@list.shop.com", "unsubscribe")
+    assert target(f"mailto:{'Ab-9' * 110}@list.shop.com")[0] == f"{'Ab-9' * 110}@list.shop.com"
+    assert target("mailto:u@x.com?subject=a%0d%0aBcc:%20z@z.com&body=hi&cc=z@z.com") == ("u@x.com", "a Bcc: z@z.com")  # one line, so no extra header
+    for bad in ("mailto:a@x.com,b@y.com", "mailto:", "mailto:a@x.com%0d%0aBcc:z@z.com", "https://x.com", None, "mailto:%22a%22@x"):
+        assert target(bad) is None, bad
 
 
 if __name__ == "__main__":

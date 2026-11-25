@@ -384,6 +384,11 @@ def sync_incremental(
     )
     if not should_continue():
         raise Cancelled()
+    # Asked before anything is written: an unsubscribe finishing meanwhile must be able to save.
+    written_to: set[str] = set()
+    if new_sent:
+        prog.update(phase="scanning_sent")
+        written_to = _recipient_domains(service, new_sent, should_continue)
     db.add_all(rows)
 
     # Opened/unread and Promotions changes update the stored labels, so scores follow.
@@ -403,10 +408,8 @@ def sync_incremental(
             .delete(synchronize_session=False)
         )
 
-    if new_sent:
-        prog.update(phase="scanning_sent")
-        domains = set(json.loads(user.replied_domains or "[]"))
-        domains |= _recipient_domains(service, new_sent, should_continue)
+    if written_to:
+        domains = set(json.loads(user.replied_domains or "[]")) | written_to
         user.replied_domains = json.dumps(sorted(domains))
 
     if not should_continue():

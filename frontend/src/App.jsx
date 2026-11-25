@@ -230,7 +230,7 @@ function PrivacyNotice({ email, onAccept }) {
         </p>
 
         <ul className="notice-points">
-          <li><Check /><span>Simplispace reads your Gmail and never deletes or changes it. It can send an unsubscribe email only if you allow it, and only when you press Send.</span></li>
+          <li><Check /><span>Simplispace reads your Gmail and never deletes or changes it. It can send an unsubscribe email only if you allow it, and only when you choose to.</span></li>
           <li><Check /><span>Nothing gets unsubscribed until you say so.</span></li>
           <li><Check /><span>AI second opinions are off by default. If you turn them on and ask for one, that sender’s domain and scoring numbers are sent for analysis. AI also writes an unsubscribe email if you ask it to. Settings shows exactly what is sent, and to whom.</span></li>
           <li><Check /><span>Email bodies are never downloaded or sent to an AI provider.</span></li>
@@ -267,9 +267,13 @@ const VIA_LABELS = {
   gmail: "Unsubscribed with Gmail’s Unsubscribe button.",
   block: "Opened in Gmail to block the sender.",
   ai_email: "An unsubscribe email was sent from your Gmail.",
+  auto_email: "An unsubscribe email was sent from your Gmail to their unsubscribe address.",
 };
 
-const CONFIRMED = ["confirmed", "page_confirmed"];
+const CONFIRMED = ["confirmed", "page_confirmed", "acknowledged"];
+const EMAILED = ["ai_email", "auto_email"];
+// Sent and waiting for an answer: off the list until a sync says how it went.
+const waitingForReply = (d) => d?.status === "checking" && EMAILED.includes(d.unsubscribed_via);
 
 const STATUS_SHORT = {
   in_progress: "In progress",
@@ -279,6 +283,8 @@ const STATUS_SHORT = {
   page_confirmed: "✓ Confirmed",
   page_failed: "Didn’t work",
   rejected: "Didn’t work",
+  not_sent: "Not sent",
+  acknowledged: "✓ Acknowledged",
   auto_reply: "Automatic reply",
   still_sending: "Still emailing",
 };
@@ -296,16 +302,20 @@ const ASK_BY_VIA = {
   link: "Did the page in your browser confirm you’re unsubscribed?",
 };
 
-function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
+function UnsubscribeStatus({ decision, domain, onRetry, onReset, onAnswer }) {
   if (decision.status === "page_confirmed") {
     return <p className="decision-note done">✓ {decision.unsubscribed_via === "block" ? "Blocked" : "Unsubscribed"}.{" "}
-      {decision.unsubscribed_via === "in_app" ? "The sender’s page" : "Gmail"} confirmed it.</p>;
+      {EMAILED.includes(decision.unsubscribed_via) ? "Their reply" : decision.unsubscribed_via === "in_app" ? "The sender’s page" : "Gmail"} confirmed it.</p>;
   }
   if (decision.status === "in_progress") {
     return (
-      <p className="decision-note checking">
-        Finish in the window that opened. Simplispace will notice when it’s done…
-      </p>
+      <div className="decision-note checking">
+        <span>Finish in the Gmail window. Simplispace updates by itself when it’s done.</span>
+        <span className="note-actions">
+          <button className="link inline" onClick={() => api.unsubscribeWindow(domain, "show").catch(() => {})}>Show window</button>
+          <button className="link inline" onClick={onReset}>Cancel</button>
+        </span>
+      </div>
     );
   }
   if (decision.status === "needs_answer") {
@@ -332,17 +342,22 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
       </div>
     );
   }
-  if (decision.status === "rejected" || decision.status === "auto_reply") {
+  if (decision.status === "acknowledged") {
+    return <p className="decision-note done">✓ They replied that they received your request.</p>;
+  }
+  if (["rejected", "auto_reply", "not_sent"].includes(decision.status)) {
     return (
       <div className="decision-note failed">
         <span>
           {decision.status === "rejected"
-            ? "Didn’t work: this address doesn’t accept email."
+            ? "Didn’t work: their reply says this address doesn’t accept email, or it bounced."
+            : decision.status === "not_sent"
+            ? "Your email isn’t in Gmail’s Sent mail, so it didn’t go out."
             : "They sent an automatic reply, so nobody may have read your email. Check the reply in Gmail, or try another way."}
         </span>
         <span className="note-actions">
           <button className="link inline" onClick={onRetry}>Try another way</button>
-          {decision.status === "auto_reply" && <button className="link inline" onClick={onReset}>Undo</button>}
+          {decision.status !== "rejected" && <button className="link inline" onClick={onReset}>Undo</button>}
         </span>
       </div>
     );
@@ -382,7 +397,7 @@ function UnsubscribeStatus({ decision, onRetry, onReset, onAnswer }) {
 
 function StillSending({ services, decisions, onRetry }) {
   const failing = services.filter((s) =>
-    ["still_sending", "page_failed", "rejected", "auto_reply"].includes(decisions[s.domain]?.status),
+    ["still_sending", "page_failed", "rejected", "not_sent", "auto_reply"].includes(decisions[s.domain]?.status),
   );
   if (failing.length === 0) return null;
   return (
@@ -403,6 +418,8 @@ function StillSending({ services, decisions, onRetry }) {
                   ? "Their address doesn’t accept email"
                   : decisions[s.domain].status === "auto_reply"
                   ? "They sent an automatic reply"
+                  : decisions[s.domain].status === "not_sent"
+                  ? "The email didn’t go out"
                   : `${decisions[s.domain].emails_since} new email${decisions[s.domain].emails_since === 1 ? "" : "s"} since ${shortDate(decisions[s.domain].unsubscribed_at)}`}
               </span>
             </div>
@@ -533,12 +550,15 @@ const STEP_TEXT = {
   },
 };
 
+// List addresses can be hundreds of characters of tracking code.
+const shortAddress = (to) => (to.length > 60 ? `${to.slice(0, 20)}…${to.slice(to.lastIndexOf("@"))}` : to);
+
 function UnsubscribeDialog({ service, account, saved, onClose, onDone }) {
   const online = useOnline();
   const [options, setOptions] = useState(null);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
-  const [otherStep, setOtherStep] = useState(saved ? "email" : null);
+  const [otherStep, setOtherStep] = useState(saved?.draft ? "email" : null);
 
   useEffect(() => {
     api.unsubscribeOptions(service.domain)
@@ -553,6 +573,12 @@ function UnsubscribeDialog({ service, account, saved, onClose, onDone }) {
   }, [onClose, working]);
 
   async function run(method) {
+    if (method === "mailto" && !options.can_send) {
+      // Come back to this dialog afterwards; nothing is sent by itself.
+      sessionStorage.setItem(PENDING_EMAIL, JSON.stringify({ account, domain: service.domain }));
+      window.location.href = api.loginUrl(true);
+      return;
+    }
     setWorking(true);
     setError("");
     try {
@@ -563,21 +589,30 @@ function UnsubscribeDialog({ service, account, saved, onClose, onDone }) {
     }
   }
 
-  const steps = options?.steps;
-  const noOption = Boolean(saved || steps);
-  const step = otherStep || options?.step;
+  // Never a dead end: senders with their own options can still be blocked if those don't work.
+  const steps = options && (options.steps || ["usual", "block"]);
+  const noOption = Boolean(saved?.draft || options?.steps);
+  const step = otherStep || options?.step || "usual";
   const choices = STEP_TEXT[step]
     ? [{ method: step, title: STEP_TEXT[step].title, detail: STEP_TEXT[step].detail(service.name) }]
     : options && !noOption
     ? [
-        {
-          method: "one_click",
-          disabled: !options.one_click,
-          title: "Unsubscribe now (one-click)",
-          detail: options.one_click
-            ? `Simplispace sends a standard unsubscribe request to ${hostOf(options.link)}. Nothing is sent from your Gmail.`
-            : "This sender has not provided the required one-click unsubscribe endpoint.",
-        },
+        options.one_click || !options.email
+          ? {
+              method: "one_click",
+              disabled: !options.one_click,
+              title: "Unsubscribe now (one-click)",
+              detail: options.one_click
+                ? `Simplispace sends a standard unsubscribe request to ${hostOf(options.link)}. Nothing is sent from your Gmail.`
+                : "This sender has not provided the required one-click unsubscribe endpoint.",
+            }
+          : {
+              method: "mailto",
+              title: "Unsubscribe now (by email)",
+              detail:
+                `Simplispace emails this sender’s unsubscribe address from your Gmail: “${options.email.subject}” to ${shortAddress(options.email.to)}.` +
+                (options.can_send ? "" : " Google will ask you to allow sending first."),
+            },
         {
           method: "gmail",
           disabled: !options.gmail || !(options.link || options.mailto),
@@ -603,6 +638,8 @@ function UnsubscribeDialog({ service, account, saved, onClose, onDone }) {
           {service.sender_email || service.domain} · {service.email_count.toLocaleString()} emails.{" "}
           {noOption
             ? "They offer no one-click or Gmail unsubscribe."
+            : step === "block"
+            ? "If their own options don’t work, you can block them."
             : "Pick how to unsubscribe. Nothing happens until you choose one."}
         </p>
         {!options && !error && !saved && <p className="muted">Checking this sender’s unsubscribe options…</p>}
@@ -652,6 +689,18 @@ function UnsubscribeDialog({ service, account, saved, onClose, onDone }) {
 
 // Unsubscribe from several senders at once. Only senders that support one-click can
 // be done in bulk; the rest need their own page, so they're listed to do one by one.
+// Big selections pass the app's own limit of 60 actions a minute: wait for it, don't fail.
+async function withPatience(task) {
+  for (let tries = 0; ; tries++) {
+    try {
+      return await task();
+    } catch (e) {
+      if (e.status !== 429 || tries >= 15) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+  }
+}
+
 function BulkUnsubscribeDialog({ services, onClose, onDone }) {
   const online = useOnline();
   const [checked, setChecked] = useState(0);
@@ -668,7 +717,9 @@ function BulkUnsubscribeDialog({ services, onClose, onDone }) {
       for (const service of services) {
         try {
           const options = await api.unsubscribeOptions(service.domain);
-          (options.one_click ? instant : manual).push(service);
+          const method = options.one_click ? "one_click" : options.email && options.can_send ? "mailto" : null;
+          if (method) instant.push({ ...service, method });
+          else manual.push(service);
         } catch {
           manual.push(service);
         }
@@ -693,7 +744,7 @@ function BulkUnsubscribeDialog({ services, onClose, onDone }) {
     const failures = [];
     for (const service of plan.instant) {
       try {
-        onDone(service.domain, await api.unsubscribe(service.domain, "one_click", true));
+        onDone(service.domain, await withPatience(() => api.unsubscribe(service.domain, service.method)));
       } catch (e) {
         failures.push({ service, reason: String(e.message || e) });
       }
@@ -717,11 +768,12 @@ function BulkUnsubscribeDialog({ services, onClose, onDone }) {
           <>
             {plan.instant.length > 0 ? (
               <p className="modal-sub">
-                <strong>{plan.instant.length} can be unsubscribed now</strong> with a standard one-click request
-                to each sender: {names(plan.instant)}. Nothing is sent from your Gmail.
+                <strong>{plan.instant.length} can be unsubscribed now</strong>: {names(plan.instant)}. Each gets a
+                standard one-click request
+                {plan.instant.some((s) => s.method === "mailto") ? ", or an email from your Gmail to its unsubscribe address" : ""}.
               </p>
             ) : (
-              <p className="modal-sub">None of these senders support one-click unsubscribe.</p>
+              <p className="modal-sub">None of these senders can be unsubscribed automatically.</p>
             )}
             {plan.manual.length > 0 && (
               <p className="muted small">
@@ -740,8 +792,14 @@ function BulkUnsubscribeDialog({ services, onClose, onDone }) {
             </p>
             {failed.length > 0 && (
               <p className="muted small">
-                {failed.length} refused the automatic request: {names(failed.map((f) => f.service))}. Use their
-                Unsubscribe button to finish in a Simplispace window.
+                {failed.length} didn’t accept it: {failed.map((f) => `${f.service.name} (${f.reason.replace(/\.$/, "")})`).join(", ")}.
+                Use their Unsubscribe button to finish in a Simplispace window.
+              </p>
+            )}
+            {plan.manual.length > 0 && (
+              <p className="muted small">
+                Not done: {names(plan.manual)}. {plan.manual.length === 1 ? "It needs" : "They need"} their own
+                Unsubscribe button.
               </p>
             )}
           </>
@@ -1453,6 +1511,7 @@ function ServiceCardInner({
 
       {unsubscribed ? (
         <UnsubscribeStatus
+          domain={service.domain}
           decision={decision}
           onRetry={() => onRetry(service)}
           onReset={() => onReset(service.domain)}
@@ -1686,14 +1745,16 @@ function HistoryView({ services, decisions, onUndoKeep, onReset }) {
         <section className="panel">
           <div className="panel-head">
             <strong>Waiting for confirmation</strong>
-            <span className="muted small">Finish these on their cards in All senders.</span>
+            <span className="muted small">Simplispace updates these by itself after each sync.</span>
           </div>
           <ul className="rows">
             {waiting.map(([domain, d]) => (
               <li key={domain}>
                 <div className="review-name">
                   <span className="svc-name">{name(domain)}</span>
-                  <span className={`status-pill ${d.status}`}>{STATUS_SHORT[d.status]}</span>
+                  <span className={`status-pill ${d.status}`}>
+                    {waitingForReply(d) ? (d.email_sent ? "Email sent ✓ Waiting for a reply" : "Email sent") : STATUS_SHORT[d.status]}
+                  </span>
                 </div>
                 <div className="review-actions">
                   <span className="muted small">{new Date(d.unsubscribed_at).toLocaleDateString()}</span>
@@ -1809,8 +1870,9 @@ function PrivacyView() {
     <>
       <section className="panel">
         <ul className="notice-points">
-          <li><Check /><span>Read-only Gmail access by default. Simplispace never deletes or changes your mail. If you allow it to send, it sends only the unsubscribe emails you check and press Send on.</span></li>
+          <li><Check /><span>Read-only Gmail access by default. Simplispace never deletes or changes your mail. If you allow it to send, it sends only the unsubscribe emails you choose to send.</span></li>
           <li><Check /><span>Only email details are read: sender, subject, date, labels, and unsubscribe headers. Email bodies are never downloaded.</span></li>
+          <li><Check /><span>To see whether an unsubscribe email worked, Simplispace reads Gmail’s one-line preview of the replies to it. The preview is not stored or sent anywhere.</span></li>
           <li><Check /><span>Your data stays on this computer by default. If you turn on AI and ask for a second opinion, that sender’s domain and scoring numbers are sent through Simplispace’s AI server to the AI provider Groq. If you set up your own AI key instead, they go straight to your provider with up to three recent subject lines. Your Gmail sign-in is stored encrypted.</span></li>
           <li><Check /><span>Sender logos are looked up by website address only, once per sender, via Google’s icon service or the sender’s own site. You can turn this off in Settings.</span></li>
           <li><Check /><span>Nothing is unsubscribed until you confirm how you want to do it.</span></li>
@@ -2058,7 +2120,7 @@ export default function App() {
   const shown = orderServices(
     services.filter((s) => {
       const d = decisions[s.domain];
-      if (d && (d.decision === "keep" || CONFIRMED.includes(d.status))) return false;
+      if (d && (d.decision === "keep" || CONFIRMED.includes(d.status) || waitingForReply(d))) return false;
       return !q || [s.name, s.domain, s.sender_email].some((v) => v?.toLowerCase().includes(q));
     }),
     order,
@@ -2115,8 +2177,12 @@ export default function App() {
     } catch {
       /* retried on next load */
     }
+    if (!signedInRef.current) {
+      decisionsRef.current = null;
+      return;
+    }
     try {
-      setDecisions(await api.decisions());
+      takeDecisions(await api.decisions());
     } catch {
       /* keep current */
     }
@@ -2124,13 +2190,40 @@ export default function App() {
 
   const loadInsights = () => api.insights().then(setInsights).catch(() => {});
 
+  // Every update from the app (a Gmail window, a sync, a reply) comes through here: the cards,
+  // History and numbers follow, and the user is told what changed.
+  const decisionsRef = useRef(null);
+  const signedInRef = useRef(false);
+  signedInRef.current = Boolean(status?.connected);
+  function takeDecisions(next) {
+    const before = decisionsRef.current;
+    if (JSON.stringify(before) === JSON.stringify(next)) return;
+    decisionsRef.current = next;
+    setDecisions(next);
+    loadInsights();
+    if (!before) return; // first load: nothing is news
+    const changed = Object.keys({ ...before, ...next }).filter((d) => before[d]?.status !== next[d]?.status);
+    const names = (list) => (list.length > 3 ? plural(list.length, "sender") : list.map(nameOf).join(", "));
+    const now = (...statuses) => changed.filter((d) => before[d] && statuses.includes(next[d]?.status));
+    const done = now("page_confirmed", "confirmed").filter((d) => next[d].unsubscribed_via !== "block");
+    const answered = now("acknowledged");
+    const blocked = now("page_confirmed", "confirmed").filter((d) => next[d].unsubscribed_via === "block");
+    const trouble = now("page_failed", "rejected", "not_sent", "auto_reply", "still_sending");
+    const closed = changed.filter((d) => before[d]?.status === "in_progress" && !next[d]);
+    if (done.length) setSuccess(`Unsubscribed from ${names(done)}.`);
+    if (answered.length) setSuccess(`${names(answered)} replied that your request was received.`);
+    if (blocked.length) setSuccess(`Blocked ${names(blocked)}.`);
+    if (trouble.length) setNotice(`${names(trouble)}: the unsubscribe needs another try. The card is back in All senders and says why.`);
+    if (closed.length)
+      setNotice(`The window closed before Gmail confirmed it, so ${names(closed)} is unchanged. Press Unsubscribe to try again.`);
+  }
+
   function applyDecision(domain, record) {
-    setDecisions((current) => {
-      const next = { ...current };
-      if (record) next[domain] = record;
-      else delete next[domain];
-      return next;
-    });
+    const next = { ...decisionsRef.current };
+    if (record) next[domain] = record;
+    else delete next[domain];
+    decisionsRef.current = next; // the user did this one, so it isn't announced as news
+    setDecisions(next);
     loadInsights();
   }
 
@@ -2179,7 +2272,7 @@ export default function App() {
     const saved = takePendingEmail(status.email);
     const service = saved && services.find((s) => s.domain === saved.domain);
     if (!service) return;
-    setSavedEmail({ ...saved, draft: { ...saved.draft, can_send: Boolean(status.can_send) } });
+    setSavedEmail(saved.draft ? { ...saved, draft: { ...saved.draft, can_send: Boolean(status.can_send) } } : null);
     setReviewing(service);
   }, [status, services]);
 
@@ -2187,16 +2280,16 @@ export default function App() {
   const waitingOnPage = Object.values(decisions).some((d) => d.status === "in_progress");
   useEffect(() => {
     if (!waitingOnPage) return;
-    const refresh = (next) =>
-      setDecisions((current) => {
-        const undone = Object.keys(current).filter((d) => current[d].status === "in_progress" && !next[d]);
-        if (undone.length)
-          setNotice("The window closed before the unsubscribe was confirmed, so that sender is unchanged. Press Unsubscribe to try again.");
-        return next;
-      });
-    const timer = setInterval(() => api.decisions().then(refresh).catch(() => {}), 1500);
+    const timer = setInterval(loadDecisions, 1000);
     return () => clearInterval(timer);
   }, [waitingOnPage]);
+
+  // Coming back to this window (say, from a Gmail window) shows the latest at once.
+  useEffect(() => {
+    const onFocus = () => loadDecisions();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
 
   // A failed or unfinished unsubscribe: clear it and reopen the method picker.
   async function retryUnsubscribe(service) {
@@ -2205,17 +2298,15 @@ export default function App() {
   }
 
   function finishUnsubscribe(domain, record) {
-    setNotice(
-      record.fallback_reason
-        ? `This sender refused the automatic request (${record.fallback_reason.replace(/\.$/, "")}), so Simplispace opened the sender’s page in a window to send it from there.`
-        : "",
-    );
+    setNotice("");
     setReviewing(null);
     applyDecision(domain, record);
     // Bounces and automatic replies arrive within a minute or two: look for them soon.
-    if (record.unsubscribed_via === "ai_email") setTimeout(() => autoSyncRef.current?.(true), 120_000);
+    if (["ai_email", "auto_email"].includes(record.unsubscribed_via)) setTimeout(() => autoSyncRef.current?.(true), 120_000);
     if (CONFIRMED.includes(record.status)) setSuccess(`Unsubscribed from ${nameOf(domain)}.`);
-    else if (record.status !== "in_progress" && !record.fallback_reason)
+    else if (EMAILED.includes(record.unsubscribed_via))
+      setSuccess(`Email sent to ${nameOf(domain)}. Simplispace checks for their answer at every sync, and brings the card back if it failed.`);
+    else if (record.status !== "in_progress")
       setSuccess(`Unsubscribe request sent to ${nameOf(domain)}. Simplispace will check for new mail during sync.`);
   }
 

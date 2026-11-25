@@ -145,11 +145,14 @@ retried with backoff.
 per sender, and keyboard shortcuts (arrows, `K` keep, `U` unsubscribe, `X` select,
 `E` recent emails).
 
-**Unsubscribe:** nothing happens until you choose a method. Senders with an unsubscribe header get a
-one-click request (RFC 8058, sent to the sender's own HTTPS endpoint) and Gmail's own Unsubscribe button,
-which opens in a Simplispace window that reads Gmail's notice, so you're never asked whether it worked. For
+**Unsubscribe:** nothing happens until you choose a method. Senders with an unsubscribe header get an automatic
+option, either a one-click request (RFC 8058, sent to the sender's own HTTPS endpoint) or an email to the
+unsubscribe address they publish, sent from your Gmail. They also get Gmail's own Unsubscribe button, which
+opens in a Simplispace window that reads Gmail's notice, so you're never asked whether it worked. For
 senders with no option, AI drafts an email that you check and send from your own Gmail (`gmail.send` is
-requested only then); if it bounces or gets an automatic reply, blocking in Gmail is offered. Undo resets
+requested only then); each sync then
+checks that it was sent and what the reply (Gmail's one-line preview of it) says: the sender is marked done,
+or its card comes back with blocking in Gmail as the next option. Undo resets
 Simplispace's record; it can't reverse a real unsubscribe, email or block.
 
 **Health score:** the share of the last 90 days of mail from Important/Useful
@@ -205,7 +208,8 @@ npm install; npm test
 | GET | /decisions | saved Keep/Unsubscribe decisions |
 | PUT | /decisions/{domain} | keep or reset a sender (`{"decision": "keep"\|null}`) |
 | GET | /unsubscribe/{domain} | unsubscribe methods the sender offers |
-| POST | /unsubscribe/{domain} | run a confirmed unsubscribe (`{"method": "one_click"\|"gmail"\|"block"}`) |
+| POST | /unsubscribe/{domain} | run a confirmed unsubscribe (`{"method": "one_click"\|"mailto"\|"gmail"\|"block"}`) |
+| POST | /unsubscribe/{domain}/window | show or cancel its open Gmail window (`{"action": "show"\|"cancel"}`) |
 | POST | /unsubscribe/{domain}/email/draft | draft an unsubscribe email (sender with no unsubscribe option) |
 | POST | /unsubscribe/{domain}/email/send | send the checked draft from the user's Gmail |
 | POST | /unsubscribe/{domain}/answer | record whether a manual unsubscribe worked |

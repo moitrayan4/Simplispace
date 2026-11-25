@@ -58,9 +58,10 @@
         Simplispace asks Google for <strong>read-only</strong> access to Gmail
         (<code>https://www.googleapis.com/auth/gmail.readonly</code>). It uses that access only to read each
         email’s sender, subject, date, labels and unsubscribe header, so it can group your mail by sender,
-        score each sender, and offer unsubscribe options. It never reads or stores the content of your emails and never deletes email.
+        score each sender, and offer unsubscribe options. It never downloads or stores the content of your emails and never deletes email. The one exception is
+        Gmail’s one-line preview of replies to unsubscribe emails it sent for you, used to see whether they worked.
         Sending is a separate, optional permission (<code>https://www.googleapis.com/auth/gmail.send</code>), used only
-        for unsubscribe emails you check and press Send on. Your data is stored on your computer; optional AI features
+        to send unsubscribe emails you choose to send. Your data is stored on your computer; optional AI features
         send limited details about a sender, as the privacy policy explains. See the <a href="privacy.html">Privacy Policy</a> for details.
       </p>
       <p class="note">

@@ -1,8 +1,10 @@
 import base64
 import json
 import os
+import secrets
 import time
 from email.message import EmailMessage
+from email.policy import SMTP
 
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
@@ -10,6 +12,7 @@ from google.oauth2 import id_token as google_id_token
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from .config import settings
 
@@ -103,12 +106,38 @@ def can_send(creds: Credentials) -> bool:
 SENT_MARK = "X-Simplispace"
 
 
-def send_email(creds: Credentials, to: str, subject: str, body: str) -> None:
-    message = EmailMessage()  # refuses line breaks in headers
-    message["To"], message["Subject"], message[SENT_MARK] = to, subject, "unsubscribe"
+def send_email(creds: Credentials, to: str, subject: str, body: str) -> dict:
+    """Send, and return Gmail's id and thread for the email so a sync can follow it."""
+    mark = f"unsubscribe-{secrets.token_hex(8)}"
+    # Refuses line breaks in headers. Long lines: a list's tracking address must not be folded.
+    message = EmailMessage(policy=SMTP.clone(max_line_length=998))
+    message["To"], message["Subject"], message[SENT_MARK] = to, subject, mark
     message.set_content(body)
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-    build_gmail(creds).users().messages().send(userId="me", body={"raw": raw}).execute()
+    messages = build_gmail(creds).users().messages()
+    try:
+        return messages.send(userId="me", body={"raw": raw}).execute() or {}
+    except Exception as e:
+        # The answer got lost, but the email may have gone: look in Sent rather than guess.
+        if isinstance(e, HttpError) and e.resp.status < 500:
+            raise
+        found = _find_sent(creds, to, mark)
+        if not found:
+            raise
+        return found
+
+
+def _find_sent(creds: Credentials, to: str, mark: str) -> dict | None:
+    try:
+        messages = build_gmail(creds).users().messages()
+        found = messages.list(userId="me", q=f"in:sent to:{to} newer_than:1d", maxResults=5).execute()
+        for item in found.get("messages", []):
+            full = {**item, **messages.get(userId="me", id=item["id"], format="metadata", metadataHeaders=[SENT_MARK]).execute()}
+            if any(h["value"] == mark for h in full.get("payload", {}).get("headers", []) if h["name"].lower() == SENT_MARK.lower()):
+                return full
+    except Exception:
+        pass
+    return None
 
 
 class SignInNeeded(RuntimeError):

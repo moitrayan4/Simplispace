@@ -83,7 +83,8 @@ def test_draft_then_send_once():
 
     result = services.send_unsubscribe_email("email.etsy.com", out(subject=draft["subject"], body=draft["body"]), db)
     msg = email.message_from_bytes(base64.urlsafe_b64decode(client.sent[0]))
-    assert (msg["To"], msg["Subject"], msg["X-Simplispace"]) == ("email@email.etsy.com", "Please unsubscribe me", "unsubscribe")
+    assert (msg["To"], msg["Subject"], msg["X-Simplispace"]) == ("email@email.etsy.com", "Please unsubscribe me", msg["X-Simplispace"])
+    assert msg["X-Simplispace"].startswith("unsubscribe-")
     assert result["status"] == "checking" and result["unsubscribed_via"] == "ai_email"  # later mail shows if it worked
     refused(409, lambda: services.send_unsubscribe_email("email.etsy.com", out(), db))
     assert len(client.sent) == 1
@@ -110,7 +111,7 @@ def test_bad_addresses_and_header_injection_are_refused():
         if bad != "me@x.com":  # parsed down to one plain address, or refused; never several
             try:
                 to = services._email_sender(db, db.query(User).first(), "email.etsy.com")[1]
-                assert services._ADDRESS.fullmatch(to), to
+                assert unsubscribe.ADDRESS.fullmatch(to), to
             except HTTPException:
                 pass
         else:
@@ -188,46 +189,180 @@ def test_one_way_at_a_time_and_the_next_after_a_failure():
     assert "steps" not in options()  # senders with an unsubscribe option are unchanged
 
 
-def test_replies_are_told_apart_by_headers_alone():
-    kind = unsubscribe.reply_kind
-    to, subject = "email@email.etsy.com", "Unsubscribe Request"
-    ask = lambda h, sender, s, after=60: kind(h, sender, s, after, to, subject)  # noqa: E731
-    assert ask({"x-failed-recipients": to}, "mailer-daemon@googlemail.com", "Delivery Status Notification (Failure)") == "rejected"
-    assert ask({"x-failed-recipients": "someone@else.com"}, "mailer-daemon@googlemail.com", "Failure") is None
-    assert ask({}, "mailer-daemon@googlemail.com", "Delivery Status Notification (Delay)") is None
-    assert ask({"auto-submitted": "auto-replied"}, "help@etsy.com", "We got your message") == "auto_reply"
-    assert ask({}, "noreply@mail.etsy.com", "Unsubscribe Request") == "auto_reply"  # Etsy's real one, unlabelled
-    assert ask({}, "noreply@mail.etsy.com", "Re: Unsubscribe Request") == "auto_reply"
-    assert ask({}, "noreply@mail.etsy.com", "Weekend sale") is None
-    assert ask({}, "noreply@mail.etsy.com", "Unsubscribe Request", 7200) is None
-    assert ask({}, "anna@etsy.com", "Re: Unsubscribe Request") is None  # a person
-    assert ask({"auto-submitted": "auto-generated"}, "email@email.etsy.com", "Sale") is None  # a newsletter
+REPLIES = {
+    "success": ["You have been unsubscribed from our mailing list.", "Hi, we've removed you from all lists. This mailbox is not monitored.",
+                "Your email address has been removed from our database", "You will no longer receive emails from us", "You won't receive any more marketing.",
+                "Your unsubscribe request has been processed", "We have now unsubscribed you. Please do not reply to this email.", "Done! You’ve been opted out.",
+                "Your subscription was cancelled. Regards"],
+    "rejected": ["Hello, This is an auto reply from Etsy.com. We are eager to assist you, but the email address to which you are replying cannot accept incoming inquiries.",
+                 "This mailbox is not monitored. Please visit our help centre.", "This is an unmonitored address", "Please do not reply to this email; replies are not read",
+                 "We are unable to process your request by email. Log in to change preferences", "We couldn't unsubscribe you because your address was not found",
+                 "You have not been unsubscribed. We can't process requests here"],
+    "acknowledged": ["We have received your request and will get back to you within 2 days", "Thank you for contacting Acme support. Your ticket has been created: #4411",
+                     "Thanks for your email. A team member will look into it", "Your request has been received (#123)"],
+    None: ["I am out of the office until Monday and will get back to you", "Weekend sale: 50% off everything", "Hi, could you tell us which address you used?",
+           "Please remove me from every mailing list. Thank you.", "If you want to be removed, click unsubscribe", "To be unsubscribed, log in to your account", ""],
+}
 
 
-def test_sync_marks_automatic_replies_and_bounces():
-    def result(sender, subject, headers):
+def test_what_a_reply_means():
+    for want, texts in REPLIES.items():
+        for text in texts:
+            assert unsubscribe.reply_meaning(text) == want, (want, unsubscribe.reply_meaning(text), text)
+    to = "email@email.etsy.com"
+    kind = lambda h, sender, subject, preview, thread=True: unsubscribe.reply_kind(h, sender, subject, preview, to, thread)  # noqa: E731
+    daemon, failed = "mailer-daemon@googlemail.com", "Address not found Your message wasn't delivered"
+    assert kind({"x-failed-recipients": to}, daemon, "Failure", "", False) == "rejected"
+    assert kind({}, daemon, "Failure", failed) == "rejected"
+    # Somebody else's bounce says nothing about ours.
+    assert kind({"x-failed-recipients": "other@x.com"}, daemon, "Failure", failed) is None
+    assert kind({}, daemon, "Failure", failed, False) is None
+    assert kind({}, daemon, "Delay", "Not delivered yet. Gmail will retry; delayed") is None
+    assert kind({"auto-submitted": "auto-replied"}, "help@etsy.com", "Hello", "We love crafts") == "auto_reply"  # can't tell
+    assert kind({}, "anna@etsy.com", "Re: x", "Hi, which address is it?") is None  # a person asking
+
+
+def test_only_answers_to_our_email_are_read():
+    ask = lambda subject, ours="Please unsubscribe me from Etsy", headers=None, thread=False, sender="a@etsy.com", after=60: (  # noqa: E731
+        unsubscribe.is_reply(subject, ours, headers or {}, thread, sender, after))
+    assert ask("Re: Please unsubscribe me from Etsy") and ask("[#12] Please unsubscribe me from Etsy") and ask("anything", thread=True)
+    assert ask("Hello", headers={"auto-submitted": "auto-replied"})
+    assert not ask("Weekend sale") and not ask("Hi there", ours="Hi") and not ask("Weekend sale", headers={"auto-submitted": "auto-generated"})
+
+
+def follow(reply=None, sent=("SENT",), via="email", gone=False, thread=False):
+    """Send an unsubscribe email, let `reply` (sender, subject, preview, headers) arrive, sync once."""
+    auto = via == "mailto"
+    db, client = setup(SEND, list_unsubscribe="<mailto:leave@list.etsy.com>" if auto else "")
+    client.send = lambda userId, body: mock.Mock(execute=lambda: (client.sent.append(body["raw"]), {"id": "S1", "threadId": "T1"})[1])
+    if auto:
+        services.confirm_unsubscribe("email.etsy.com", services.UnsubscribeIn(method="mailto"), db)
+    else:
+        services.send_unsubscribe_email("email.etsy.com", out(subject="Please unsubscribe me from Etsy"), db)
+    user, now = db.query(User).first(), datetime.utcnow() + timedelta(seconds=30)
+    asked = []
+
+    def full(mid, sender, subject, preview, headers):
+        h = {"From": sender, "Subject": subject, **headers}
+        return {"id": mid, "labelIds": ["INBOX"], "snippet": preview, "internalDate": str(int((now - datetime(1970, 1, 1)).total_seconds() * 1000)),
+                "payload": {"headers": [{"name": k, "value": v} for k, v in h.items()]}}
+
+    if reply and not thread:
+        db.add(Message(user_id=user.id, gmail_id="R", sender_domain=reply[0].split("@")[1], sender_email=reply[0], subject=reply[1], date=now, list_unsubscribe=""))
+    db.add(Message(user_id=user.id, gmail_id="OTHER", sender_domain="other.com", sender_email="x@other.com", subject="Private", date=now, list_unsubscribe=""))
+    db.commit()
+
+    def get(id, **_):
+        asked.append(id)
+        if id == "S1":
+            if gone:
+                from googleapiclient.errors import HttpError
+                from httplib2 import Response
+                return mock.Mock(execute=mock.Mock(side_effect=HttpError(Response({"status": 404}), b"")))
+            return mock.Mock(execute=lambda: {"id": "S1", "threadId": "T1", "labelIds": list(sent)})
+        return mock.Mock(execute=lambda: full(id, *reply))
+
+    client.get = get
+    ours = {"id": "S1", "labelIds": ["SENT"], "snippet": "You have been unsubscribed", "payload": {"headers": []}}
+    client.threads = lambda: mock.Mock(get=lambda **_: mock.Mock(execute=lambda: {"messages": [ours] + ([full("R", *reply)] if thread else [])}))
+    services._check_replies(db, user.id)
+    db.expire_all()
+    assert "OTHER" not in asked  # nobody else's mail is opened
+    return services.list_decisions(db)["email.etsy.com"], db, client, asked
+
+
+def test_next_sync_says_how_the_email_went():
+    status = lambda *a, **k: follow(*a, **k)[0]["status"]  # noqa: E731
+    d, *_ = follow()
+    assert (d["status"], d["email_sent"]) == ("checking", True)  # seen in Sent, nobody answered yet
+    assert status(gone=True) == "not_sent" == status(sent=("DRAFT",))
+    subject = "Please unsubscribe me from Etsy"
+    assert status(("noreply@mail.etsy.com", subject, REPLIES["rejected"][0], {})) == "rejected"  # Etsy's real one
+    assert status(("care@etsy.com", "Re: " + subject, "You have been unsubscribed.", {})) == "page_confirmed"
+    assert status(("care@etsy.com", "Re: " + subject, "We have received your request.", {})) == "acknowledged"
+    assert status(("desk@zendesk.com", "Case 9", "We&#39;ve removed you from our list", {}), thread=True) == "page_confirmed"  # helpdesk, same conversation
+    assert status(("mailer-daemon@googlemail.com", "Delivery Status Notification (Failure)", "", {"X-Failed-Recipients": "email@email.etsy.com"})) == "rejected"
+    assert status(("mailer-daemon@googlemail.com", "Delivery Status Notification (Failure)", "Address not found", {"X-Failed-Recipients": "other@x.com"})) == "checking"
+    assert status(("email@email.etsy.com", "Weekend sale", "You have been unsubscribed from prices!", {})) == "checking"  # just a newsletter
+    # The sender's own unsubscribe address
+    assert status(("list@list.etsy.com", "Re: unsubscribe", "You are now unsubscribed", {}), via="mailto") == "page_confirmed"
+    assert status(("list@list.etsy.com", "Hello", "Thanks", {"Auto-Submitted": "auto-replied"}), via="mailto") == "checking"
+    assert status(("mailer-daemon@googlemail.com", "Failure", "", {"X-Failed-Recipients": "leave@list.etsy.com"}), via="mailto") == "rejected"
+
+
+def test_a_failed_email_brings_the_next_way_and_an_answer_is_not_still_emailing():
+    d, db, *_ = follow(("noreply@mail.etsy.com", "Please unsubscribe me from Etsy", REPLIES["rejected"][0], {}))
+    services.set_decision("email.etsy.com", services.DecisionIn(decision=None), db)  # Try another way
+    assert services.unsubscribe_options("email.etsy.com", db)["step"] == "block"
+
+    d, db, client, _ = follow(("email@email.etsy.com", "Re: Please unsubscribe me from Etsy", "We have received your request.", {}))
+    row = db.query(Decision).first()
+    started = row.unsubscribed_at
+    # A later, clearer answer still counts, and a busy Gmail just means trying again.
+    client.get = lambda **_: mock.Mock(execute=mock.Mock(side_effect=OSError("offline")))
+    client.threads = lambda: mock.Mock(get=mock.Mock(side_effect=OSError("offline")))
+    services._check_replies(db, db.query(User).first().id)
+    assert db.query(Decision).first().page_result == "acknowledged"
+    # Mail after the two days from their answer is what counts as still emailing.
+    user = db.query(User).first()
+    db.add(Message(user_id=user.id, gmail_id="ad", sender_domain="email.etsy.com", sender_email="email@email.etsy.com", subject="Sale",
+                   date=started + timedelta(days=3), list_unsubscribe=""))
+    db.commit()
+    assert services.list_decisions(db)["email.etsy.com"]["status"] == "still_sending"
+
+
+def test_unsubscribe_address_is_written_to_by_the_app():
+    header = "<mailto:leave@list.etsy.com?subject=unsub%20123>"
+    db, client = setup(SEND, list_unsubscribe=header)
+    send = lambda: services.confirm_unsubscribe("email.etsy.com", services.UnsubscribeIn(method="mailto"), db)  # noqa: E731
+    o = services.unsubscribe_options("email.etsy.com", db)
+    assert o["email"] == {"to": "leave@list.etsy.com", "subject": "unsub 123"} and "steps" not in o
+    assert send()["status"] == "checking"
+    msg = email.message_from_bytes(base64.urlsafe_b64decode(client.sent[0]))
+    assert (msg["To"], msg["Subject"], db.query(Decision).first().unsubscribed_via) == ("leave@list.etsy.com", "unsub 123", "auto_email")
+    refused(409, send)
+    assert len(client.sent) == 1
+    db, client = setup(READ, list_unsubscribe=header)
+    refused(403, lambda: services.confirm_unsubscribe("email.etsy.com", services.UnsubscribeIn(method="mailto"), db))
+    db, client = setup(SEND, list_unsubscribe="<mailto:a@x.com,b@y.com>")
+    refused(409, lambda: services.confirm_unsubscribe("email.etsy.com", services.UnsubscribeIn(method="mailto"), db))
+    assert client.sent == [] and db.query(Decision).count() == 0
+
+
+def test_long_tracking_addresses_arrive_unchanged():
+    for to in (f"{'Ab-9' * 114}@list.shop.com", "u+a=b@x.com", "short@x.com"):
         db, client = setup(SEND)
-        services.send_unsubscribe_email("email.etsy.com", out(subject="Unsubscribe Request"), db)
-        user = db.query(User).first()
-        db.add(Message(user_id=user.id, gmail_id="r", sender_domain=sender.split("@")[1], sender_email=sender,
-                       subject=subject, date=datetime.utcnow() + timedelta(seconds=30), list_unsubscribe=""))
-        db.add(Message(user_id=user.id, gmail_id="o", sender_domain="other.com", sender_email="noreply@other.com",
-                       subject="Unsubscribe Request", date=datetime.utcnow(), list_unsubscribe=""))
-        db.commit()
-        asked = []
+        gmail.send_email(gmail.credentials_from_json(""), to, "S" * 150, "Please unsubscribe.")
+        raw = base64.urlsafe_b64decode(client.sent[0])
+        assert b"To: " + to.encode() + bytes([13, 10]) in raw, raw[:200]
+        assert "".join(email.message_from_bytes(raw)["Subject"].split()) == "S" * 150
 
-        def get(id, **_):
-            asked.append(id)
-            return mock.Mock(execute=lambda: {"payload": {"headers": [{"name": k, "value": v} for k, v in headers.items()]}})
+
+def test_a_lost_answer_is_looked_up_instead_of_guessed():
+    for arrived in (True, False):
+        db, client = setup(SEND)
+
+        def send(userId, body):
+            def lost():
+                if arrived:
+                    client.sent.append(body["raw"])
+                raise ConnectionResetError(10054, "gone")
+            return mock.Mock(execute=lost)
+
+        client.send = send
+        client.list = lambda **_: mock.Mock(execute=lambda: {"messages": [{"id": f"s{i}"} for i in range(len(client.sent))]})
+
+        def get(id, metadataHeaders=(), **_):
+            mark = email.message_from_bytes(base64.urlsafe_b64decode(client.sent[0]))["X-Simplispace"] if id.startswith("s") else ""
+            return mock.Mock(execute=lambda: {"payload": {"headers": [{"name": "X-Simplispace", "value": mark}] if mark else []}})
 
         client.get = get
-        services._check_replies(db, user.id)
-        assert asked == ["r"], asked  # other senders' mail isn't looked at
-        return services._decision_json(db.query(Decision).first(), db, user)["status"]
-
-    assert result("noreply@mail.etsy.com", "Unsubscribe Request", {}) == "auto_reply"
-    assert result("mailer-daemon@googlemail.com", "Failure", {"X-Failed-Recipients": "email@email.etsy.com"}) == "rejected"
-    assert result("email@email.etsy.com", "Sale", {}) == "checking"
+        go = lambda: services.send_unsubscribe_email("email.etsy.com", out(), db)  # noqa: E731
+        if arrived:
+            assert go()["status"] == "checking" and db.query(Decision).count() == 1
+        else:
+            refused(502, go)
+            assert db.query(Decision).count() == 0
 
 
 def test_sending_is_only_requested_when_asked_for():

@@ -71,7 +71,8 @@ class Decision(Base):
     unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # What the sender's page said when it was opened inside the app:
     # in_progress | success | failed | visited (sender's page shown, result left to the
-    # mailbox check) | rejected (email bounced) | auto_reply | unclear (None when opened outside the app).
+    # mailbox check) | not_sent | rejected (email bounced, or the
+    # reply said it isn't accepted) | acknowledged | auto_reply | unclear (None when opened outside the app).
     page_result: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -91,6 +92,9 @@ class UnsubAttempt(Base):
     # For emails: what to look for among the replies.
     to_address: Mapped[str | None] = mapped_column(String, nullable=True)
     subject: Mapped[str | None] = mapped_column(String, nullable=True)
+    sent_id: Mapped[str | None] = mapped_column(String, nullable=True)  # the email in Gmail
+    thread_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    sent_ok: Mapped[bool | None] = mapped_column(Boolean, default=False, nullable=True)  # seen in Sent by a sync
 
 
 class HealthSnapshot(Base):
